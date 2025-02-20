@@ -1,0 +1,14 @@
+beautifulsoup4==4.13.3
+bs4==0.0.2
+certifi==2025.1.31
+charset-normalizer==3.4.1
+idna==3.10
+mutagen==1.47.0
+PlexAPI==4.16.1
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.16
+PyQt5_sip==12.17.0
+requests==2.32.3
+soupsieve==2.6
+typing_extensions==4.12.2
+urllib3==2.3.0
