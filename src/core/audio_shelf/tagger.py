@@ -80,17 +80,26 @@ def normalize_author(author: str) -> str:
     return normalized.strip()
 
 def normalize_title(title: str) -> str:
-    """Normalize title for comparison: remove subtitles, disc references, and parenthetical content."""
+    """Normalize title for comparison: remove subtitles, disc references, and bracketed content."""
     # Remove subtitle after colon: "Title: Subtitle" -> "Title"
-    # Remove subtitle after dash: "Title - Subtitle" -> "Title"
     if ':' in title:
         title = title.split(':', 1)[0]
-    elif ' - ' in title:
-        # Only split on " - " (with spaces) to avoid splitting hyphenated words
-        title = title.split(' - ', 1)[0]
+    # Remove subtitle after dash (with or without spaces): "Title - Subtitle" OR "Title- Subtitle" -> "Title"
+    elif '-' in title:
+        # Use regex to split on dash with optional surrounding spaces
+        parts = re.split(r'\s*-\s*', title, 1)
+        if len(parts) > 1:
+            title = parts[0]
     
     # Remove ALL parenthetical content: "Title (Anything Here)" -> "Title"
     title = re.sub(r'\s*\([^)]*\)\s*', ' ', title)
+    
+    # Remove ALL square bracket content: "Title [Anything Here]" -> "Title"
+    title = re.sub(r'\s*\[[^\]]*\]\s*', ' ', title)
+    
+    # Remove edition references universally: "Title, X Edition" -> "Title"
+    # Matches ANY word(s) before "Edition" (e.g., Third, Revised, Special Anniversary, etc.)
+    title = re.sub(r',?\s+[\w\s]+Edition\s*', '', title, flags=re.IGNORECASE)
     
     # Remove disc/disk references (with or without parentheses)
     # "Title Disc 1" OR "Title Disk 2" -> "Title"
@@ -119,12 +128,21 @@ def calculate_confidence(query: BookQuery, meta: BookMeta) -> float:
     if not query.title or not meta.title:
         return 0.0
     
-    # Normalize titles before comparison (remove subtitles)
+    # Normalize titles before comparison (remove subtitles, brackets, etc.)
     query_title_norm = normalize_title(query.title).lower()
     found_title_norm = normalize_title(meta.title).lower()
     
-    # Title Similarity
-    title_sim = difflib.SequenceMatcher(None, query_title_norm, found_title_norm).ratio()
+    # Strip commas and normalize whitespace for comparison
+    query_title_clean = re.sub(r'[,\s]+', ' ', query_title_norm).strip()
+    found_title_clean = re.sub(r'[,\s]+', ' ', found_title_norm).strip()
+    
+    # Title Similarity - Use substring matching first (handles subtitle differences)
+    # If one title is contained in the other, it's a perfect match
+    if found_title_clean in query_title_clean or query_title_clean in found_title_clean:
+        title_sim = 1.0
+    else:
+        # Fall back to fuzzy matching (on cleaned strings)
+        title_sim = difflib.SequenceMatcher(None, query_title_clean, found_title_clean).ratio()
     
     # Author Similarity (if available in query)
     author_sim = None
@@ -135,8 +153,31 @@ def calculate_confidence(query: BookQuery, meta: BookMeta) -> float:
         # Join multiple authors for comparison (handles "Author1, Author2" format)
         found_auth_joined = ", ".join([normalize_author(a) for a in meta.authors]).lower()
         
-        # Compare the full author strings
-        author_sim = difflib.SequenceMatcher(None, q_auth, found_auth_joined).ratio()
+        # Strip commas and normalize whitespace for comparison
+        q_auth_clean = re.sub(r'[,\s]+', ' ', q_auth).strip()
+        found_auth_clean = re.sub(r'[,\s]+', ' ', found_auth_joined).strip()
+        
+        # Helper function to strip degree suffixes from author names
+        def strip_degrees(author_name):
+            # Remove PhD, MD, Dr., MA, MBA, etc. (case-insensitive)
+            cleaned = re.sub(r'\s*(phd|md|dr\.?|ma|mba|mfa|ms|bs|ba)\s*', '', author_name, flags=re.IGNORECASE)
+            return cleaned.strip()
+        
+        # Order-independent author matching: split into individual names and compare as sets
+        # Split by common separators (comma, 'and', '&')
+        q_authors_list = re.split(r'[,&]|\sand\s', q_auth_clean)
+        q_authors_set = set([strip_degrees(a.strip()) for a in q_authors_list if a.strip()])
+        
+        found_authors_list = re.split(r'[,&]|\sand\s', found_auth_clean)
+        found_authors_set = set([strip_degrees(a.strip()) for a in found_authors_list if a.strip()])
+        
+        # Check if all query authors are in found authors (allows extra authors in found)
+        if q_authors_set and q_authors_set.issubset(found_authors_set):
+            # All query authors found (order doesn't matter)
+            author_sim = 1.0
+        else:
+            # Fall back to fuzzy matching (on cleaned strings)
+            author_sim = difflib.SequenceMatcher(None, q_auth_clean, found_auth_clean).ratio()
     
     # Adaptive Weighting: Only score fields that exist in query
     if author_sim is not None:
@@ -698,46 +739,49 @@ class TaggerEngine:
         authors_str = ", ".join(meta.authors) if meta.authors else "Unknown"
         found_info = f"Found: '{meta.title}' by {authors_str} [{source_detail}]"
         
-        if confidence < 0.90:
+        if confidence < 0.85:
              msg = f"Skipped (Low Confidence {confidence:.2f})\n\tFound: {found_info}"
              msg += f"\n\tGenres: {meta.genres}"
-             log(f"CONFIDENCE FAIL: {confidence:.2f} < 0.90")
+             log(f"CONFIDENCE FAIL: {confidence:.2f} < 0.85")
              log(f"Query was: {q.title} / {q.author}")
              log(f"Found was: {meta.title} / {meta.authors}")
              return False, msg
 
         log(f"Confidence PASS ({confidence:.2f}). Proceeding to update.")
 
-        # 5. Handle Cover Art
+        # 5. Handle Cover Art (only if checkbox is enabled)
         cover_data = None
-        if force_cover:
-            log("Force Replace Cover Art enabled. Will download and replace.")
-            if meta.cover_url:
-                try:
-                    log(f"Downloading Cover from: {meta.cover_url}")
-                    r = self.session.get(meta.cover_url, timeout=10)
-                    if r.status_code == 200:
-                        cover_data = r.content
-                        log("Cover downloaded successfully.")
-                except Exception:
-                    log("Failed to download cover.")
+        if fields_to_update.get('cover', True):  # Default to True if not specified
+            if force_cover:
+                log("Force Replace Cover Art enabled. Will download and replace.")
+                if meta.cover_url:
+                    try:
+                        log(f"Downloading Cover from: {meta.cover_url}")
+                        r = self.session.get(meta.cover_url, timeout=10)
+                        if r.status_code == 200:
+                            cover_data = r.content
+                            log("Cover downloaded successfully.")
+                    except Exception:
+                        log("Failed to download cover.")
+                else:
+                    log("No Cover URL in metadata.")
+            elif has_cover_art(path):
+                log("Existing Cover Art detected. Preserving it.")
             else:
-                log("No Cover URL in metadata.")
-        elif has_cover_art(path):
-            log("Existing Cover Art detected. Preserving it.")
+                log("No Cover Art. Attempting to fetch...")
+                if meta.cover_url:
+                    try:
+                        log(f"Downloading Cover from: {meta.cover_url}")
+                        r = self.session.get(meta.cover_url, timeout=10)
+                        if r.status_code == 200:
+                            cover_data = r.content
+                            log("Cover downloaded successfully.")
+                    except Exception:
+                        log("Failed to download cover.")
+                else:
+                    log("No Cover URL in metadata.")
         else:
-             log("No Cover Art. Attempting to fetch...")
-             if meta.cover_url:
-                 try:
-                     log(f"Downloading Cover from: {meta.cover_url}")
-                     r = self.session.get(meta.cover_url, timeout=10)
-                     if r.status_code == 200:
-                         cover_data = r.content
-                         log("Cover downloaded successfully.")
-                 except Exception:
-                     log("Failed to download cover.")
-             else:
-                 log("No Cover URL in metadata.")
+            log("Cover Art checkbox unchecked. Skipping cover art update.")
         
         try:
             if dry_run:
@@ -748,6 +792,13 @@ class TaggerEngine:
                 return True, msg
             else:
                 log("Applying tags to file...")
+                # Log which fields will be updated
+                updating_fields = [k for k, v in fields_to_update.items() if v]
+                if updating_fields:
+                    log(f"Fields to update: {', '.join(updating_fields)}")
+                else:
+                    log("⚠️  WARNING: No fields selected for update!")
+                
                 apply_metadata(path, meta, cover_data, fields_to_update)
                 msg = f"Updated (Confidence {confidence:.2f})\n\t{found_info}"
                 msg += f"\n\tGenres: {meta.genres}"

@@ -1,6 +1,6 @@
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QButtonGroup
+    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QButtonGroup, QApplication
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -86,6 +86,25 @@ class SidebarWidget(QWidget):
             }
         """)
         bottom_layout.addWidget(settings_btn)
+
+        # Exit Button
+        exit_btn = QPushButton("Exit App")
+        exit_btn.clicked.connect(QApplication.instance().quit)
+        exit_btn.setStyleSheet("""
+            QPushButton {
+                text-align: left;
+                padding: 12px 20px;
+                border: none;
+                color: #aaa;
+                background: transparent;
+            }
+            QPushButton:hover {
+                color: #ff5555;
+                background-color: #383838;
+                font-weight: bold;
+            }
+        """)
+        bottom_layout.addWidget(exit_btn)
         layout.addWidget(bottom_frame)
 
     def add_nav_btn(self, text, page_id, checked=False):

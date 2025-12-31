@@ -65,9 +65,10 @@ class DragDropLineEdit(QLineEdit):
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
-            path = urls[0].toLocalFile()
-            if path:
-                self.setText(path)
+            # Accept all dropped directories/files and join with commas
+            paths = [url.toLocalFile() for url in urls if url.toLocalFile()]
+            if paths:
+                self.setText(", ".join(paths))
                 event.acceptProposedAction()
 
 class OrganizerWidget(QWidget):
@@ -148,7 +149,7 @@ class OrganizerWidget(QWidget):
         self.scan_btn.setEnabled(False)
         self.execute_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
-        self.scan_thread = OrganizerScanThread(self.organizer, d, {"mp3", "m4a", "m4b", "pdf", "epub"})
+        self.scan_thread = OrganizerScanThread(self.organizer, d, {"mp3", "m4a", "m4b", "opus", "pdf", "epub"})
         self.scan_thread.finished.connect(self.scan_finished)
         self.scan_thread.start()
 

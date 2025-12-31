@@ -42,10 +42,22 @@ class TaggerThread(QThread):
             # Pass our signal emitter as the callback for real-time logging
             success, msg = self.engine.process_file(f, fields_to_update=self.fields_to_update, dry_run=self.dry_run, force_cover=self.force_cover, log_callback=self.log_signal.emit)
             
-            # If metadata lookup failed (not just low confidence), mark directory as failed
-            if not success and "No metadata found online" in msg:
-                self.failed_directories.add(file_dir)
-                self.log_signal.emit(f"📁 Marking directory for skip: {os.path.basename(file_dir)}/")
+            # If metadata lookup failed, mark directory as failed
+            if not success:
+                # Case 1: No metadata found online
+                if "No metadata found online" in msg:
+                    self.failed_directories.add(file_dir)
+                    self.log_signal.emit(f"📁 Marking directory for skip: {os.path.basename(file_dir)}/ (no metadata)")
+                # Case 2: Extremely low confidence (< 0.50) = fundamentally wrong match
+                elif "Low Confidence" in msg:
+                    # Extract confidence score from message
+                    import re
+                    match = re.search(r'Low Confidence (\d+\.\d+)', msg)
+                    if match:
+                        confidence = float(match.group(1))
+                        if confidence < 0.50:
+                            self.failed_directories.add(file_dir)
+                            self.log_signal.emit(f"📁 Marking directory for skip: {os.path.basename(file_dir)}/ (confidence {confidence:.2f} < 0.50)")
             
             status = "SUCCESS" if success else "FAILED"
             self.log_signal.emit(f"[{status}] Final Result: {msg}")
@@ -79,11 +91,12 @@ class TagEditorWidget(QWidget):
         layout.addLayout(header_layout)
 
         # Input
-        input_group = QGroupBox("Input Directory")
+        input_group = QGroupBox("Input Directories (comma-separated or multiple select)")
         input_layout = QHBoxLayout()
         self.dir_edit = DragDropLineEdit()
+        self.dir_edit.setPlaceholderText("Enter directories separated by commas, or drag & drop")
         browse_btn = QPushButton("Browse")
-        browse_btn.clicked.connect(self.browse_dir)
+        browse_btn.clicked.connect(self.browse_dirs)
         input_layout.addWidget(self.dir_edit)
         input_layout.addWidget(browse_btn)
         
@@ -103,6 +116,16 @@ class TagEditorWidget(QWidget):
         field_group = QGroupBox("Update Fields (Uncheck to skip)")
         field_layout = QVBoxLayout()
         field_layout.setSpacing(8)  # Moderate spacing
+        
+        # Master Select All checkbox
+        master_layout = QHBoxLayout()
+        self.select_all_check = QCheckBox("Select All / Deselect All")
+        self.select_all_check.setChecked(True)
+        self.select_all_check.setStyleSheet("font-weight: bold; color: #00bcd4;")
+        self.select_all_check.stateChanged.connect(self.toggle_all_fields)
+        master_layout.addWidget(self.select_all_check)
+        master_layout.addStretch()
+        field_layout.addLayout(master_layout)
         
         # Create checkboxes (more compact)
         self.title_check = QCheckBox("Title")
@@ -127,6 +150,13 @@ class TagEditorWidget(QWidget):
         self.grouping_check.setChecked(False)  # Optional field
         self.compilation_check = QCheckBox("Compilation")
         self.compilation_check.setChecked(False)  # Optional field
+        
+        # Store all field checkboxes for easy access
+        self.field_checkboxes = [
+            self.title_check, self.author_check, self.album_check, self.album_artist_check,
+            self.genre_check, self.year_check, self.publisher_check, self.grouping_check,
+            self.description_check, self.cover_check, self.compilation_check
+        ]
         
         # Add to layout in four columns (more compact)
         row1 = QHBoxLayout()
@@ -154,7 +184,7 @@ class TagEditorWidget(QWidget):
         field_layout.addLayout(row2)
         field_layout.addLayout(row3)
         field_group.setLayout(field_layout)
-        field_group.setMaximumHeight(150)  # Slightly more height
+        field_group.setMaximumHeight(180)  # Slightly taller for master checkbox
         layout.addWidget(field_group)
 
         # Force Cover Art Option
@@ -201,30 +231,66 @@ class TagEditorWidget(QWidget):
         
         layout.addLayout(action_layout)
 
-    def browse_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Directory")
-        if d:
-            self.dir_edit.setText(d)
-            self.scan_files()
+    def browse_dirs(self):
+        """Browse to select multiple directories"""
+        # Use custom dialog to allow multiple folder selection
+        from PyQt5.QtWidgets import QFileDialog
+        dialog = QFileDialog(self, "Select Directories")
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        
+        # Enable multi-selection in tree view
+        file_view = dialog.findChild(QListView, 'listView')
+        if file_view:
+            file_view.setSelectionMode(QListView.MultiSelection)
+        tree_view = dialog.findChild(QTreeView)
+        if tree_view:
+            tree_view.setSelectionMode(QTreeView.MultiSelection)
+        
+        if dialog.exec_():
+            directories = dialog.selectedFiles()
+            if directories:
+                self.dir_edit.setText(", ".join(directories))
+                self.scan_files()
 
     def scan_files(self):
-        d = self.dir_edit.text()
-        if not d or not os.path.isdir(d):
+        """Scan files from multiple directories (comma-separated)"""
+        dir_text = self.dir_edit.text()
+        if not dir_text:
+            return
+        
+        # Split by comma and strip whitespace
+        directories = [d.strip() for d in dir_text.split(',') if d.strip()]
+        
+        if not directories:
             return
 
         self.files = []
         self.file_list.clear()
         
-        for root, _, files in os.walk(d):
-            for f in files:
-                if f.lower().endswith((".mp3", ".m4a", ".m4b", ".opus")):
-                    path = os.path.join(root, f)
-                    self.files.append(path)
-                    self.file_list.addItem(f)
-                    
-        self.log_area.append(f"Found {len(self.files)} audio files.")
+        for directory in directories:
+            if not os.path.isdir(directory):
+                self.log_area.append(f"⚠️  Skipping invalid directory: {directory}")
+                continue
+                
+            for root, _, files in os.walk(directory):
+                for f in files:
+                    if f.lower().endswith((".mp3", ".m4a", ".m4b", ".opus")):
+                        path = os.path.join(root, f)
+                        self.files.append(path)
+                        self.file_list.addItem(f)
+        
+        total_dirs = len(directories)
+        self.log_area.append(f"Found {len(self.files)} audio files from {total_dirs} director{'y' if total_dirs == 1 else 'ies'}.")
         if self.files:
             self.run_btn.setEnabled(True)
+    
+    def toggle_all_fields(self):
+        """Toggle all field checkboxes based on Select All checkbox state"""
+        is_checked = self.select_all_check.isChecked()
+        for checkbox in self.field_checkboxes:
+            checkbox.setChecked(is_checked)
     
     def update_button_text(self):
         """Update button text based on dry run checkbox state"""
