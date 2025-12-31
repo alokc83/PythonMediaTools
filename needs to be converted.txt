@@ -1,0 +1,12 @@
+Files that need to be converted (unsupported formats):
+
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist August 2023 SiteRip Collection - BASiQ/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio (March 2020) Collection/README.txt
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio (March 2020) Collection/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio (March 2020) Collection/Biography & Memoir/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio (March 2020) Collection/all-mix/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio Collection  - August 2023 - OPUS/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio Collection  - August 2023 - OPUS/convert.sh
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio Collection (August 2023)/.DS_Store
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio Collection (August 2023)/.smbdeleteAAA171a08b
+/Volumes/PlexMediaServer/PlexMediaLibrary/Blinkist/Blinkist SiteRip Audio Collection (August 2023)/.smbdeleteAAA171a093
