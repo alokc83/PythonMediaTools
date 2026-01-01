@@ -301,7 +301,13 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             
         data = r.json() or {}
         
-        title = norm_space(str(data.get("title") or ""))
+        # Rating Extraction
+        rating = ""
+        rating_count = ""
+        rating_data = data.get("rating") or {}
+        if isinstance(rating_data, dict):
+            rating = str(rating_data.get("value") or "")
+            rating_count = str(rating_data.get("count") or "")
         desc = shorten_description(str(data.get("description") or "") or str(data.get("summary") or ""))
         
         authors = [a.get("name") for a in (data.get("authors") or []) if isinstance(a, dict) and a.get("name")]
@@ -352,7 +358,9 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             source_url=f"https://www.audible.com/pd/{asin}",
             cover_url=cover_url,
             asin=asin,
-            grouping=uniq_ci(grouping_list)
+            grouping=uniq_ci(grouping_list),
+            rating=rating,
+            rating_count=rating_count
         )
     except Exception:
         return None
@@ -398,7 +406,14 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
                 # Narrators
                 for n in data.get("narrators", []):
                     if n.get("name"): narrators.append(n["name"])
-            except:
+                
+                # Rating from JSON-LD
+                rating_avg = ""
+                review_cnt = ""
+                agg = data.get("aggregateRating", {})
+                if agg:
+                     rating_avg = str(agg.get("ratingValue", ""))
+                     review_cnt = str(agg.get("reviewCount", ""))
                 pass
         
         # Fallback to visual elements if JSON failed
@@ -467,7 +482,10 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             source="audible_scrape",
             source_url=url,
             cover_url=cover_url,
-            asin=asin
+            cover_url=cover_url,
+            asin=asin,
+            rating=rating_avg,
+            rating_count=review_cnt
         )
     except Exception as e:
         print(f"DEBUG: Scrape Error: {e}")
@@ -512,7 +530,9 @@ def google_books_search(session: requests.Session, q: BookQuery, api_key: str = 
             description=shorten_description(vi.get("description", "")),
             genres=uniq_ci(vi.get("categories", [])),
             language=vi.get("language", ""),
+            language=vi.get("language", ""),
             rating=str(vi.get("averageRating", "")),
+            rating_count=str(vi.get("ratingsCount", "")),
             source="google_books",
             source_url=vi.get("infoLink", ""),
             cover_url=cover_url
@@ -959,12 +979,13 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
         isbn10=primary.isbn10 or secondary.isbn10,
         isbn13=primary.isbn13 or secondary.isbn13,
         rating=primary.rating or secondary.rating,
-        rating_count=primary.rating_count or secondary.rating_count,
         source=source_str,
         source_url=primary.source_url or secondary.source_url,
         cover_url=primary.cover_url or secondary.cover_url,
         asin=primary.asin or secondary.asin,
-        grouping=new_grouping
+        grouping=new_grouping,
+        rating=primary.rating or secondary.rating,
+        rating_count=primary.rating_count or secondary.rating_count
     )
 
 class TaggerEngine:
@@ -1180,6 +1201,9 @@ class TaggerEngine:
         # Format authors without square brackets
         authors_str = ", ".join(meta.authors) if meta.authors else "Unknown"
         found_info = f"Found: '{meta.title}' by {authors_str} [{source_detail}]"
+        if meta.rating:
+            found_info += f" ⭐️ {meta.rating}"
+            if meta.rating_count: found_info += f" ({meta.rating_count})"
         
         if confidence < 0.85:
              msg = f"Skipped (Low Confidence {confidence:.2f})\n\tFound: {found_info}"
@@ -1228,6 +1252,27 @@ class TaggerEngine:
             self.log("Cover Art checkbox unchecked. Skipping cover art update.")
         
         try:
+            # --- APPLY RATINGS TO DESCRIPTION ---
+            if meta.rating:
+                # Format: "⭐️ Rating: 4.8/5 (12,450 reviews)"
+                stars = meta.rating
+                if "/" not in stars: stars += "/5"
+                
+                rating_line = f"⭐️ Rating: {stars}"
+                if meta.rating_count:
+                    # Format number nicely if possible
+                    try:
+                        count_int = int(re.sub(r'[^0-9]', '', meta.rating_count))
+                        rating_line += f" ({count_int:,} reviews)"
+                    except:
+                        rating_line += f" ({meta.rating_count} reviews)"
+                
+                # Prepend to description
+                if meta.description:
+                     meta.description = f"{rating_line}\n\n{meta.description}"
+                else:
+                     meta.description = rating_line
+            
             if dry_run:
                 self.log("🔍 DRY RUN: Skipping file write (would apply tags...)")
                 msg = f"[DRY RUN] Would Update (Confidence {confidence:.2f})\n\t{found_info}"

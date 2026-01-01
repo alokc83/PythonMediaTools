@@ -176,7 +176,7 @@ class TagEditorWidget(QWidget):
         
         # Column 1
         col1 = QVBoxLayout()
-        col1.setSpacing(10)
+        col1.setSpacing(14)
         col1.addWidget(self.title_check)
         col1.addWidget(self.author_check)
         col1.addWidget(self.album_check)
@@ -184,7 +184,7 @@ class TagEditorWidget(QWidget):
         
         # Column 2
         col2 = QVBoxLayout()
-        col2.setSpacing(10)
+        col2.setSpacing(14)
         col2.addWidget(self.album_artist_check)
         col2.addWidget(self.genre_check)
         col2.addWidget(self.year_check)
@@ -192,7 +192,7 @@ class TagEditorWidget(QWidget):
         
         # Column 3
         col3 = QVBoxLayout()
-        col3.setSpacing(10)
+        col3.setSpacing(14)
         col3.addWidget(self.publisher_check)
         col3.addWidget(self.grouping_check)
         col3.addWidget(self.description_check)
@@ -200,7 +200,7 @@ class TagEditorWidget(QWidget):
         
         # Column 4
         col4 = QVBoxLayout()
-        col4.setSpacing(10)
+        col4.setSpacing(14)
         col4.addWidget(self.cover_check)
         col4.addWidget(self.compilation_check)
         col4.addStretch()
