@@ -31,7 +31,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Audio Toolbox")
-        self.setGeometry(100, 100, 1280, 850)
+        self.setWindowTitle("Audio Toolbox")
+        self.resize(1280, 850)
+        self.setMinimumSize(1000, 700) # Enable resizing with constraints
         
         self.settings_manager = SettingsManager()
         
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
         # 1. Sidebar
         self.sidebar = SidebarWidget()
         self.sidebar.change_page_signal.connect(self.handle_navigation)
+        self.sidebar.open_settings_signal.connect(self.show_settings)
         self.main_layout.addWidget(self.sidebar)
         
         # 2. Content Area (Stacked Widget)
@@ -73,7 +76,7 @@ class MainWindow(QMainWindow):
         self.flattener_widget = FlattenerWidget()
         self.organizer_widget = OrganizerWidget()
         self.pruner_widget = PrunerWidget()
-        self.tag_editor_widget = TagEditorWidget()
+        self.tag_editor_widget = TagEditorWidget(self.settings_manager)
         self.atf_cleaner_widget = ATFCleanerWidget()
         
         # Stack Order Mapping

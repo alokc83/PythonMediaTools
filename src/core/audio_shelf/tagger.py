@@ -42,6 +42,7 @@ class BookMeta:
     source_url: str = ""
     cover_url: str = ""
     asin: str = ""
+    grouping: str = "" # Added for Series/Collection support
 
     def __post_init__(self):
         self.authors = self.authors or []
@@ -310,10 +311,29 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             name = norm_space(str(g.get("name") or ""))
             typ = norm_space(str(g.get("type") or "")).lower()
             if not name: continue
-            if typ == "genre": genres.append(name)
-            else: tags.append(name) 
+            
+            # Helper to split granular genres by "&" and ","
+            # "Business & Careers" -> ["Business", "Careers"]
+            sub_parts = re.split(r'[,&]|\sand\s', name)
+            clean_parts = [p.strip() for p in sub_parts if p.strip()]
+
+            if typ == "genre": 
+                genres.extend(clean_parts)
+            else: 
+                tags.extend(clean_parts) 
         
         cover_url = str(data.get("image") or "")
+        
+        # Extract Series for Grouping
+        # "series": [{"title": "Series Name", "sequence": "1"}]
+        grouping = ""
+        series_list = data.get("series") or []
+        if series_list and isinstance(series_list, list) and len(series_list) > 0:
+            first_series = series_list[0]
+            if isinstance(first_series, dict):
+                 series_name = first_series.get("title")
+                 if series_name:
+                     grouping = series_name
             
         return BookMeta(
             title=title,
@@ -328,7 +348,8 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             source="audnexus",
             source_url=f"https://www.audible.com/pd/{asin}",
             cover_url=cover_url,
-            asin=asin
+            asin=asin,
+            grouping=grouping
         )
     except Exception:
         return None
@@ -449,7 +470,7 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
         print(f"DEBUG: Scrape Error: {e}")
         return None
 
-def google_books_search(session: requests.Session, q: BookQuery) -> Optional[BookMeta]:
+def google_books_search(session: requests.Session, q: BookQuery, api_key: str = None) -> Optional[BookMeta]:
     if not q.title: return None
     parts = [f'intitle:"{q.title}"']
     if q.author: parts.append(f'inauthor:"{q.author}"')
@@ -457,6 +478,11 @@ def google_books_search(session: requests.Session, q: BookQuery) -> Optional[Boo
     
     url = "https://www.googleapis.com/books/v1/volumes"
     params = {"q": query, "maxResults": 1, "printType": "books"}
+    
+    # Add API key if provided for higher rate limits
+    if api_key:
+        params["key"] = api_key
+    
     try:
         r = session.get(url, params=params, timeout=10)
         r.raise_for_status()
@@ -813,29 +839,102 @@ def is_file_metadata_match(path: str, meta: BookMeta, fields_to_update: dict) ->
             
         # If we passed all checks
         return True
-
+        
     except Exception as e:
         # On any error reading tags, assume mismatch and force update
         return False
 
+
+# --- Merging Logic ---
+
+def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
+    """
+    Merges secondary metadata into primary.
+    - Lists (Genres, Tags, Authors, Narrators): Union (Deduplicated).
+    - Singles (Description, Publisher, Date): Keep Primary unless empty, or if Secondary is significantly better.
+    """
+    if not secondary:
+        return primary
+    if not primary:
+        return secondary
+        
+    # Merge genres (Union)
+    # 1. Combine
+    raw_genres = primary.genres + secondary.genres
+    
+    # 2. Split granularly (Aggressive splitting to fix "Business & Economics")
+    final_genres = []
+    for g in raw_genres:
+        # Split by & , or ' and '
+        parts = re.split(r'[,&]|\sand\s', g)
+        clean_parts = [p.strip() for p in parts if p.strip()]
+        final_genres.extend(clean_parts)
+        
+    new_genres = uniq_ci(final_genres)
+    new_tags = uniq_ci(primary.tags + secondary.tags)
+    new_authors = uniq_ci(primary.authors + secondary.authors)
+    new_narrators = uniq_ci(primary.narrators + secondary.narrators)
+    
+    # Description: Prefer Longest
+    desc = primary.description
+    if secondary.description and len(secondary.description) > len(desc or ""):
+        desc = secondary.description
+        
+    # Date/Publisher: Prefer Primary, fallback to secondary
+    pub = primary.publisher or secondary.publisher
+    date = primary.published_date or secondary.published_date
+    lang = primary.language or secondary.language
+    
+    # Source string
+    source_str = f"{primary.source}+{secondary.source}" if primary.source and secondary.source else (primary.source or secondary.source)
+    
+    return BookMeta(
+        title=primary.title, # Always keep primary title identification
+        authors=new_authors,
+        narrators=new_narrators,
+        publisher=pub,
+        published_date=date,
+        language=lang,
+        description=desc,
+        genres=new_genres,
+        tags=new_tags,
+        isbn10=primary.isbn10 or secondary.isbn10,
+        isbn13=primary.isbn13 or secondary.isbn13,
+        rating=primary.rating or secondary.rating,
+        rating_count=primary.rating_count or secondary.rating_count,
+        source=source_str,
+        source_url=primary.source_url or secondary.source_url,
+        cover_url=primary.cover_url or secondary.cover_url,
+        asin=primary.asin or secondary.asin,
+        grouping=primary.grouping or secondary.grouping
+    )
+
 class TaggerEngine:
-    def __init__(self):
+    def __init__(self, log_callback=None, google_books_api_key=None):
         self.session = make_session()
         self.atf_handler = ATFHandler()
+        self.log_callback = log_callback
+        self.google_books_api_key = google_books_api_key
         
-    def process_file(self, path: str, fields_to_update: dict = None, dry_run: bool = False, force_cover: bool = False, log_callback=None) -> Tuple[bool, str]:
+    def log(self, msg):
+        if self.log_callback:
+            self.log_callback(msg)
+        else:
+            print(msg)
+
+    def process_file(self, path: str, fields_to_update: dict = None, dry_run: bool = False, force_cover: bool = False, providers: List[str] = None) -> Tuple[bool, str]:
         """
         Returns (success, message)
         fields_to_update: dict with keys: title, author, album, genre, year, publisher, description, cover
         dry_run: if True, skip writing but show what would be written
         force_cover: if True, replace cover art even if it exists
+        providers: List of providers to fetch from. Options: ['audnexus', 'google']. Default: ['audnexus']
         """
-        def log(msg):
-            if log_callback:
-                log_callback(msg)
-
+        if providers is None:
+            providers = ['audnexus']
+            
         directory = os.path.dirname(path)
-        log(f"--- Processing: {os.path.basename(path)} ---")
+        self.log(f"--- Processing: {os.path.basename(path)} ---")
         
         # --- ATF CACHE CHECK ---
         atf_status, atf_data = self.atf_handler.read_atf(directory)
@@ -893,7 +992,7 @@ class TaggerEngine:
             
             # However, if the user added new files to the folder, we might want to tag them using cached data.
             # Let's try to USE valid cache to tag the file, skipping the API search.
-            log("Found cached metadata (ATF). Using cache instead of online search.")
+            self.log("Found cached metadata (ATF). Using cache instead of online search.")
             
             meta = BookMeta(
                 source=atf_data.get("source", "Cache"),
@@ -922,11 +1021,11 @@ class TaggerEngine:
                      # Also check cover? (Rough check: if not forcing cover, and text matches, we assume good)
                      # Or check if cover exists. logic is complex, simpler to trust text match + has_cover check
                      if has_cover_art(path):
-                         log("Skipping file (Metadata & Cover already up-to-date with Cache).")
+                         self.log("Skipping file (Metadata & Cover already up-to-date with Cache).")
                          return True, "Skipped (Already up-to-date)"
             
             if dry_run:
-                log("🔍 DRY RUN: Using Cached Metadata (would apply tags...)")
+                self.log("🔍 DRY RUN: Using Cached Metadata (would apply tags...)")
                 return True, "Dry Run"
             else:
                 apply_metadata(path, meta, cover_data, fields_to_update)
@@ -935,60 +1034,85 @@ class TaggerEngine:
         # --- END ATF CHECK ---
 
         q = read_metadata(path)
-        log(f"Extracted Metadata from File:\n\tTitle: {q.title}\n\tAuthor: {q.author}")
+        self.log(f"Extracted Metadata from File:\n\tTitle: {q.title}\n\tAuthor: {q.author}")
         
         if not q.title:
             return False, "No Title found to search"
             
-        meta = None
-
-        # Strategy 1: Internal Audible Search -> Audnexus
-        log("Step 1: Trying Internal Audible Search (Audnexus)...")
-        asin, _ = audible_find_asin(self.session, q)
-        if asin:
-             log(f"Found ASIN via Internal Search: {asin}")
-             meta = provider_audnexus_by_asin(self.session, asin)
-
-        # Strategy 2: Robust External Search (DuckDuckGo) because Internal search sucks
-        if not meta:
-            log("Internal search failed. Step 2: Trying Robust External Search (DuckDuckGo)...")
-            query_str = f"{q.title} {q.author}".strip()
-            found_urls = search_duckduckgo_audible(query_str)
             
-            for url in found_urls:
-                log(f"Found candidate URL: {url}")
-                # Try to extract ASIN first for Audnexus (Cleanest Data)
-                found_asin = extract_asin_from_url(url)
-                if found_asin:
-                    log(f"Extracted ASIN: {found_asin}. Querying Audnexus...")
-                    meta = provider_audnexus_by_asin(self.session, found_asin)
-                    if meta:
-                        log("Audnexus Success!")
-                        break
-                
-                # If no ASIN or Audnexus failed, Try Direct Scrape (Robust fallback)
-                if not meta:
-                    log("Audnexus failed. Fallback: Direct HTML Scraping...")
-                    meta = provider_audible_scrape(self.session, url)
-                    if meta:
-                        log("Direct Scraping Success!")
-                        break
+        meta_results = []
         
-        # Strategy 3: Google Books (Last Resort)
-        if not meta:
-             log("Audible strategies failed. Step 3: Falling back to Google Books...")
-             meta = google_books_search(self.session, q)
-        else:
-             log(f"Match Found: '{meta.title}' via {meta.source}")
-             
-        if not meta:
-            log("No metadata found from any source.")
+        # --- MULTI-PROVIDER SEARCH ---
+        
+        # Provider 1: Audnexus (Audible) - Primary
+        if 'audnexus' in providers:
+            self.log("Step 1: Trying Audnexus (Audible)...")
+            asin, _ = audible_find_asin(self.session, q)
+            if asin:
+                self.log(f"Found ASIN via Internal Search: {asin}")
+                audnexus_meta = provider_audnexus_by_asin(self.session, asin)
+                if audnexus_meta:
+                    meta_results.append(audnexus_meta)
+                    self.log(f"Audnexus: Found '{audnexus_meta.title}'")
+            
+            # Fallback: DuckDuckGo external search if internal fails
+            if not meta_results:
+                self.log("Internal search failed. Trying Robust External Search (DuckDuckGo)...")
+                query_str = f"{q.title} {q.author}".strip()
+                found_urls = search_duckduckgo_audible(query_str)
+                
+                for url in found_urls:
+                    self.log(f"Found candidate URL: {url}")
+                    # Try to extract ASIN first for Audnexus (Cleanest Data)
+                    found_asin = extract_asin_from_url(url)
+                    if found_asin:
+                        self.log(f"Extracted ASIN: {found_asin}. Querying Audnexus...")
+                        audnexus_meta = provider_audnexus_by_asin(self.session, found_asin)
+                        if audnexus_meta:
+                            self.log("Audnexus Success!")
+                            meta_results.append(audnexus_meta)
+                            break
+                    
+                    # If no ASIN or Audnexus failed, Try Direct Scrape
+                    if not meta_results:
+                        self.log("Audnexus failed. Fallback: Direct HTML Scraping...")
+                        scrape_meta = provider_audible_scrape(self.session, url)
+                        if scrape_meta:
+                            self.log("Direct Scraping Success!")
+                            meta_results.append(scrape_meta)
+                            break
+        
+        # Provider 2: Google Books (Enrichment)
+        if 'google' in providers:
+            self.log("Step 2: Querying Google Books for enrichment...")
+            google_meta = google_books_search(self.session, q, api_key=self.google_books_api_key)
+            if google_meta:
+                meta_results.append(google_meta)
+                self.log(f"Google Books: Found '{google_meta.title}'")
+            else:
+                self.log("Google Books: No results")
+        
+        #  If no metadata found from ANY provider
+        if not meta_results:
+            self.log("No metadata found from any source.")
             # Record failure in ATF to skip this directory next time
             self.atf_handler.write_atf(directory, os.path.basename(directory), "METADATA_NOT_FOUND")
             return False, "No metadata found online"
-            
+        
+        # --- MERGE RESULTS ---
+        if len(meta_results) == 1:
+            meta = meta_results[0]
+            self.log(f"Match Found: '{meta.title}' via {meta.source}")
+        else:
+            # Multiple sources - merge them!
+            self.log(f"Merging metadata from {len(meta_results)} sources...")
+            meta = meta_results[0]  # Start with primary (usually Audnexus)
+            for secondary in meta_results[1:]:
+                meta = merge_metadata(meta, secondary)
+            self.log(f"Merged Result: '{meta.title}' from {meta.source}")
+              
         # 4. Confidence Check
-        log("Step 4: Calculating Confidence Score...")
+        self.log("Step 3: Calculating Confidence Score...")
         confidence = calculate_confidence(q, meta)
         
         source_detail = meta.source
@@ -1002,64 +1126,64 @@ class TaggerEngine:
         if confidence < 0.85:
              msg = f"Skipped (Low Confidence {confidence:.2f})\n\tFound: {found_info}"
              msg += f"\n\tGenres: {meta.genres}"
-             log(f"CONFIDENCE FAIL: {confidence:.2f} < 0.85")
-             log(f"Query was: {q.title} / {q.author}")
-             log(f"Found was: {meta.title} / {meta.authors}")
+             self.log(f"CONFIDENCE FAIL: {confidence:.2f} < 0.85")
+             self.log(f"Query was: {q.title} / {q.author}")
+             self.log(f"Found was: {meta.title} / {meta.authors}")
              # Record failure in ATF to skip this directory next time
              self.atf_handler.write_atf(directory, os.path.basename(directory), "LOW_CONFIDENCE")
              return False, msg
 
-        log(f"Confidence PASS ({confidence:.2f}). Proceeding to update.")
+        self.log(f"Confidence PASS ({confidence:.2f}). Proceeding to update.")
 
         # 5. Handle Cover Art (only if checkbox is enabled)
         cover_data = None
         if fields_to_update.get('cover', True):  # Default to True if not specified
             if force_cover:
-                log("Force Replace Cover Art enabled. Will download and replace.")
+                self.log("Force Replace Cover Art enabled. Will download and replace.")
                 if meta.cover_url:
                     try:
-                        log(f"Downloading Cover from: {meta.cover_url}")
+                        self.log(f"Downloading Cover from: {meta.cover_url}")
                         r = self.session.get(meta.cover_url, timeout=10)
                         if r.status_code == 200:
                             cover_data = r.content
-                            log("Cover downloaded successfully.")
+                            self.log("Cover downloaded successfully.")
                     except Exception:
-                        log("Failed to download cover.")
+                        self.log("Failed to download cover.")
                 else:
-                    log("No Cover URL in metadata.")
+                    self.log("No Cover URL in metadata.")
             elif has_cover_art(path):
-                log("Existing Cover Art detected. Preserving it.")
+                self.log("Existing Cover Art detected. Preserving it.")
             else:
-                log("No Cover Art. Attempting to fetch...")
+                self.log("No Cover Art. Attempting to fetch...")
                 if meta.cover_url:
                     try:
-                        log(f"Downloading Cover from: {meta.cover_url}")
+                        self.log(f"Downloading Cover from: {meta.cover_url}")
                         r = self.session.get(meta.cover_url, timeout=10)
                         if r.status_code == 200:
                             cover_data = r.content
-                            log("Cover downloaded successfully.")
+                            self.log("Cover downloaded successfully.")
                     except Exception:
-                        log("Failed to download cover.")
+                        self.log("Failed to download cover.")
                 else:
-                    log("No Cover URL in metadata.")
+                    self.log("No Cover URL in metadata.")
         else:
-            log("Cover Art checkbox unchecked. Skipping cover art update.")
+            self.log("Cover Art checkbox unchecked. Skipping cover art update.")
         
         try:
             if dry_run:
-                log("🔍 DRY RUN: Skipping file write (would apply tags...)")
+                self.log("🔍 DRY RUN: Skipping file write (would apply tags...)")
                 msg = f"[DRY RUN] Would Update (Confidence {confidence:.2f})\n\t{found_info}"
                 msg += f"\n\tGenres: {meta.genres}"
-                log("DRY RUN: File would be updated.")
+                self.log("DRY RUN: File would be updated.")
                 return True, msg
             else:
-                log("Applying tags to file...")
+                self.log("Applying tags to file...")
                 # Log which fields will be updated
                 updating_fields = [k for k, v in fields_to_update.items() if v]
                 if updating_fields:
-                    log(f"Fields to update: {', '.join(updating_fields)}")
+                    self.log(f"Fields to update: {', '.join(updating_fields)}")
                 else:
-                    log("⚠️  WARNING: No fields selected for update!")
+                    self.log("⚠️  WARNING: No fields selected for update!")
                 
                 apply_metadata(path, meta, cover_data, fields_to_update)
                 
@@ -1082,8 +1206,8 @@ class TaggerEngine:
                 
                 msg = f"Updated (Confidence {confidence:.2f})\n\t{found_info}"
                 msg += f"\n\tGenres: {meta.genres}"
-                log("SUCCESS: File updated.")
+                self.log("SUCCESS: File updated.")
                 return True, msg
         except Exception as e:
-            log(f"ERROR: Failed to write tags: {e}")
+            self.log(f"ERROR: Failed to write tags: {e}")
             return False, f"Write Error: {str(e)}"

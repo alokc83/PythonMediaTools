@@ -3,7 +3,7 @@ import os
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QListWidget, QFileDialog, QGroupBox, QTableWidget, QTableWidgetItem,
-    QHeaderView, QProgressBar, QMessageBox, QTextEdit, QCheckBox
+    QHeaderView, QProgressBar, QMessageBox, QTextEdit, QCheckBox, QLineEdit
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from src.core.audio_shelf.tagger import TaggerEngine
@@ -14,13 +14,14 @@ class TaggerThread(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, files, fields_to_update=None, dry_run=False, force_cover=False):
+    def __init__(self, files, fields_to_update=None, dry_run=False, force_cover=False, providers=None, google_api_key=None):
         super().__init__()
         self.files = files
         self.fields_to_update = fields_to_update or {}
         self.dry_run = dry_run
         self.force_cover = force_cover
-        self.engine = TaggerEngine()
+        self.providers = providers or ['audnexus']  # Default to audnexus if not specified
+        self.engine = TaggerEngine(log_callback=None, google_books_api_key=google_api_key)
         self.running = True
         self.failed_directories = set()  # Track directories where metadata lookup failed
 
@@ -39,8 +40,10 @@ class TaggerThread(QThread):
                 self.log_signal.emit("-" * 50)
                 continue
             
-            # Pass our signal emitter as the callback for real-time logging
-            success, msg = self.engine.process_file(f, fields_to_update=self.fields_to_update, dry_run=self.dry_run, force_cover=self.force_cover, log_callback=self.log_signal.emit)
+            # Pass our signal emitter as the callback for real-time logging, and providers
+            # Update engine's log_callback for this specific file
+            self.engine.log_callback = self.log_signal.emit
+            success, msg = self.engine.process_file(f, fields_to_update=self.fields_to_update, dry_run=self.dry_run, force_cover=self.force_cover, providers=self.providers)
             
             # If metadata lookup failed, mark directory as failed
             if not success:
@@ -70,8 +73,9 @@ class TaggerThread(QThread):
 
 
 class TagEditorWidget(QWidget):
-    def __init__(self):
+    def __init__(self, settings_manager=None):
         super().__init__()
+        self.settings_manager = settings_manager
         self.files = []
         self.init_ui()
 
@@ -109,11 +113,16 @@ class TagEditorWidget(QWidget):
 
         # File List
         self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(250)  # Larger file list
+        self.file_list.setMinimumHeight(85)  # Reduced further
+        self.file_list.setMaximumHeight(200) # Prevent it from dominating
         layout.addWidget(self.file_list)
 
         # Field Selection
         field_group = QGroupBox("Update Fields (Uncheck to skip)")
+        field_group.setStyleSheet("""
+            QCheckBox { font-size: 13px; spacing: 8px; }
+            QCheckBox::indicator { width: 18px; height: 18px; }
+        """)
         field_layout = QVBoxLayout()
         field_layout.setSpacing(8)  # Moderate spacing
         
@@ -158,33 +167,75 @@ class TagEditorWidget(QWidget):
             self.description_check, self.cover_check, self.compilation_check
         ]
         
-        # Add to layout in four columns (more compact)
-        row1 = QHBoxLayout()
-        row1.setSpacing(15)
-        row1.addWidget(self.title_check)
-        row1.addWidget(self.author_check)
-        row1.addWidget(self.album_check)
-        row1.addWidget(self.album_artist_check)
+        # Four-column layout for better space utilization
+        columns_layout = QHBoxLayout()
         
-        row2 = QHBoxLayout()
-        row2.setSpacing(15)
-        row2.addWidget(self.genre_check)
-        row2.addWidget(self.year_check)
-        row2.addWidget(self.publisher_check)
-        row2.addWidget(self.grouping_check)
+        # Column 1
+        col1 = QVBoxLayout()
+        col1.setSpacing(10)
+        col1.addWidget(self.title_check)
+        col1.addWidget(self.author_check)
+        col1.addWidget(self.album_check)
+        col1.addStretch()
         
-        row3 = QHBoxLayout()
-        row3.setSpacing(15)
-        row3.addWidget(self.description_check)
-        row3.addWidget(self.cover_check)
-        row3.addWidget(self.compilation_check)
-        row3.addStretch()  # Push to left
+        # Column 2
+        col2 = QVBoxLayout()
+        col2.setSpacing(10)
+        col2.addWidget(self.album_artist_check)
+        col2.addWidget(self.genre_check)
+        col2.addWidget(self.year_check)
+        col2.addStretch()
         
-        field_layout.addLayout(row1)
-        field_layout.addLayout(row2)
-        field_layout.addLayout(row3)
+        # Column 3
+        col3 = QVBoxLayout()
+        col3.setSpacing(10)
+        col3.addWidget(self.publisher_check)
+        col3.addWidget(self.grouping_check)
+        col3.addWidget(self.description_check)
+        col3.addStretch()
+        
+        # Column 4
+        col4 = QVBoxLayout()
+        col4.setSpacing(10)
+        col4.addWidget(self.cover_check)
+        col4.addWidget(self.compilation_check)
+        col4.addStretch()
+        
+        columns_layout.addLayout(col1)
+        columns_layout.addLayout(col2)
+        columns_layout.addLayout(col3)
+        columns_layout.addLayout(col4)
+        
+        field_layout.addLayout(columns_layout)
+        
+        # Provider Selection Section
+        provider_section = QLabel("Metadata Providers:")
+        provider_section.setStyleSheet("font-weight: bold; color: #00bcd4; margin-top: 15px;")
+        field_layout.addWidget(provider_section)
+        
+        provider_layout = QHBoxLayout()
+        provider_layout.setSpacing(20)
+        
+        # Audnexus checkbox (Default on, Primary)
+        self.provider_audnexus_check = QCheckBox("Audnexus (Audible) - Primary")
+        self.provider_audnexus_check.setChecked(True)
+        self.provider_audnexus_check.setToolTip("Primary audiobook metadata source from Audible")
+        
+        # Google Books checkbox (Default off, Enrichment)
+        self.provider_google_check = QCheckBox("Google Books - Enrichment")
+        self.provider_google_check.setChecked(False)
+        self.provider_google_check.setToolTip("Enrich metadata with additional genres from Google Books")
+        
+        provider_layout.addWidget(self.provider_audnexus_check)
+        provider_layout.addWidget(self.provider_google_check)
+        provider_layout.addStretch()
+        
+        field_layout.addLayout(provider_layout)
+        
+        field_layout.addLayout(provider_layout)
+        
         field_group.setLayout(field_layout)
-        field_group.setMaximumHeight(180)  # Slightly taller for master checkbox
+        field_group.setMaximumHeight(260)  # Adjusted for 2-column layout
         layout.addWidget(field_group)
 
         # Force Cover Art Option
@@ -205,7 +256,7 @@ class TagEditorWidget(QWidget):
         log_layout = QVBoxLayout()
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setMinimumHeight(400)  # Much larger process log
+        self.log_area.setMinimumHeight(100)  # Reduced to allow shrinking
         log_layout.addWidget(self.log_area)
         log_group.setLayout(log_layout)
         layout.addWidget(log_group)
@@ -320,6 +371,22 @@ class TagEditorWidget(QWidget):
         dry_run = self.dry_run_check.isChecked()
         force_cover = self.force_cover_check.isChecked()
         
+        # Collect selected providers
+        providers = []
+        if self.provider_audnexus_check.isChecked():
+            providers.append('audnexus')
+        if self.provider_google_check.isChecked():
+            providers.append('google')
+        
+        if not providers:
+            QMessageBox.warning(self, "No Providers Selected", "Please select at least one metadata provider!")
+            return
+        
+        # Collect Google Books API key (from global settings)
+        google_api_key = None
+        if self.settings_manager:
+            google_api_key = self.settings_manager.get('google_api_key')
+        
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
@@ -329,7 +396,7 @@ class TagEditorWidget(QWidget):
             self.log_area.append('<span style="color: #ff9800; font-weight: bold;">🔍 DRY RUN MODE - No files will be modified</span>')
             self.log_area.append("-" * 50)
         
-        self.thread = TaggerThread(self.files, fields_to_update, dry_run, force_cover)
+        self.thread = TaggerThread(self.files, fields_to_update, dry_run, force_cover, providers, google_api_key)
         self.thread.progress_signal.connect(self.update_progress)
         self.thread.log_signal.connect(self.log_msg)
         self.thread.finished_signal.connect(self.finished)

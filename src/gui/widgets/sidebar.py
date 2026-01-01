@@ -6,6 +6,7 @@ from PyQt5.QtCore import Qt, pyqtSignal
 
 class SidebarWidget(QWidget):
     change_page_signal = pyqtSignal(int)
+    open_settings_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -72,7 +73,7 @@ class SidebarWidget(QWidget):
         bottom_frame = QFrame()
         bottom_layout = QVBoxLayout(bottom_frame)
         settings_btn = QPushButton("Settings")
-        settings_btn.clicked.connect(lambda: self.change_page_signal.emit(99))
+        settings_btn.clicked.connect(self.open_settings_signal.emit)
         settings_btn.setStyleSheet("""
             QPushButton {
                 text-align: left;
