@@ -42,13 +42,16 @@ class BookMeta:
     source_url: str = ""
     cover_url: str = ""
     asin: str = ""
-    grouping: str = "" # Added for Series/Collection support
+    grouping: List[str] = None # Added for Series/Collection support
+
 
     def __post_init__(self):
         self.authors = self.authors or []
         self.narrators = self.narrators or []
         self.genres = self.genres or []
         self.tags = self.tags or []
+        self.grouping = self.grouping or []
+
 
 def norm_space(s: str) -> str:
     s = s.replace("_", " ")
@@ -326,18 +329,18 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
         
         # Extract Series for Grouping
         # "series": [{"title": "Series Name", "sequence": "1"}]
-        grouping = ""
-        series_list = data.get("series") or []
-        if series_list and isinstance(series_list, list) and len(series_list) > 0:
-            first_series = series_list[0]
-            if isinstance(first_series, dict):
-                 series_name = first_series.get("title")
-                 if series_name:
-                     grouping = series_name
+        grouping_list = []
+        series_data = data.get("series") or []
+        if series_data and isinstance(series_data, list):
+            for s in series_data:
+                if isinstance(s, dict) and s.get("title"):
+                    title = s.get("title").strip()
+                    if title:
+                        grouping_list.append(title)
             
         return BookMeta(
             title=title,
-            authors=uniq_ci(authors),
+             authors=uniq_ci(authors),
             narrators=uniq_ci(narrators),
             publisher=norm_space(str(data.get("publisherName") or "")),
             published_date=norm_space(str(data.get("releaseDate") or "")),
@@ -349,7 +352,7 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             source_url=f"https://www.audible.com/pd/{asin}",
             cover_url=cover_url,
             asin=asin,
-            grouping=grouping
+            grouping=uniq_ci(grouping_list)
         )
     except Exception:
         return None
@@ -628,9 +631,13 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
         tags.add(TLAN(encoding=3, text=[meta.language]))
     if fields_to_update.get("description") and meta.description:
         tags.add(COMM(encoding=3, lang="eng", desc="Description", text=[meta.description]))
-    if fields_to_update.get("grouping") and meta.genres:
-        # Use first genre as grouping
-        tags.add(TIT1(encoding=3, text=[meta.genres[0]]))
+    if fields_to_update.get("grouping"):
+        if meta.grouping:
+            # Use series name(s) for grouping
+            grp_str = "; ".join(meta.grouping)
+            tags.add(TIT1(encoding=3, text=[grp_str]))
+        else:
+            tags.delall("TIT1")
     if fields_to_update.get("compilation"):
         # Mark as compilation (1 = yes, 0 = no)
         tags.add(TCMP(encoding=3, text=["1"]))
@@ -677,8 +684,11 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
         tags["\xa9pub"] = [meta.publisher]
     if fields_to_update.get("description") and meta.description:
         tags["desc"] = [meta.description]
-    if fields_to_update.get("grouping") and meta.genres:
-        tags["\xa9grp"] = [meta.genres[0]]  # First genre as grouping
+    if fields_to_update.get("grouping"):
+        if meta.grouping:
+            tags["\xa9grp"] = ["; ".join(meta.grouping)]  # Series support
+        elif "\xa9grp" in tags:
+            del tags["\xa9grp"]
     if fields_to_update.get("compilation"):
         tags["cpil"] = [True]  # Compilation flag
     
@@ -717,8 +727,11 @@ def update_opus_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields
         tags["organization"] = meta.publisher
     if fields_to_update.get("description") and meta.description:
         tags["description"] = meta.description
-    if fields_to_update.get("grouping") and meta.genres:
-        tags["grouping"] = meta.genres[0]
+    if fields_to_update.get("grouping"):
+        if meta.grouping:
+            tags["grouping"] = "; ".join(meta.grouping)
+        elif "grouping" in tags:
+            del tags["grouping"]
     if fields_to_update.get("compilation"):
         tags["compilation"] = "1"
     if fields_to_update.get("genre") and meta.genres:
@@ -875,6 +888,17 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
     new_authors = uniq_ci(primary.authors + secondary.authors)
     new_narrators = uniq_ci(primary.narrators + secondary.narrators)
     
+    # Merge Grouping (Series)
+    # Apply aggressive splitting logic (same as Genre) per user request
+    raw_grouping = primary.grouping + secondary.grouping
+    final_grouping = []
+    for g in raw_grouping:
+        # Split by & , or ' and '
+        parts = re.split(r'[,&]|\sand\s', g)
+        clean_parts = [p.strip() for p in parts if p.strip()]
+        final_grouping.extend(clean_parts)
+    new_grouping = uniq_ci(final_grouping)
+    
     # Description: Prefer Longest
     desc = primary.description
     if secondary.description and len(secondary.description) > len(desc or ""):
@@ -906,7 +930,7 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
         source_url=primary.source_url or secondary.source_url,
         cover_url=primary.cover_url or secondary.cover_url,
         asin=primary.asin or secondary.asin,
-        grouping=primary.grouping or secondary.grouping
+        grouping=new_grouping
     )
 
 class TaggerEngine:
