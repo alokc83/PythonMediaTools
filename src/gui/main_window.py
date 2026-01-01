@@ -25,6 +25,7 @@ from src.gui.widgets.audio_shelf.flattener_widget import FlattenerWidget
 from src.gui.widgets.audio_shelf.organizer_widget import OrganizerWidget
 from src.gui.widgets.audio_shelf.pruner_widget import PrunerWidget
 from src.gui.widgets.audio_shelf.tag_editor_widget import TagEditorWidget
+from src.gui.widgets.audio_shelf.atf_cleaner_widget import ATFCleanerWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
         self.organizer_widget = OrganizerWidget()
         self.pruner_widget = PrunerWidget()
         self.tag_editor_widget = TagEditorWidget()
+        self.atf_cleaner_widget = ATFCleanerWidget()
         
         # Stack Order Mapping
         # 0: Dashboard
@@ -112,6 +114,7 @@ class MainWindow(QMainWindow):
         add_page(self.bitrate_mover, 13)
         
         add_page(self.tag_editor_widget, 14)
+        add_page(self.atf_cleaner_widget, 15)
         
         # Set default
         self.handle_navigation(0)

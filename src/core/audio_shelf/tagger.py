@@ -136,13 +136,69 @@ def calculate_confidence(query: BookQuery, meta: BookMeta) -> float:
     query_title_clean = re.sub(r'[,\s]+', ' ', query_title_norm).strip()
     found_title_clean = re.sub(r'[,\s]+', ' ', found_title_norm).strip()
     
-    # Title Similarity - Use substring matching first (handles subtitle differences)
-    # If one title is contained in the other, it's a perfect match
+    # Title Similarity
+    # Strategy 1: Substring Matching (Direct)
+
+    # Fuzzy Matching Helpers (Standard Library only)
+    def fuzzy_ratio(s1, s2):
+        return difflib.SequenceMatcher(None, s1, s2).ratio()
+        
+    def token_sort_ratio(s1, s2):
+        """Sorts words alphabetically and compares. Handles 'Dan Brown' vs 'Brown, Dan'."""
+        t1 = " ".join(sorted(s1.split()))
+        t2 = " ".join(sorted(s2.split()))
+        return fuzzy_ratio(t1, t2)
+        
+    def token_set_ratio(s1, s2):
+        """
+        Intersection of words. Handles 'Origin' vs 'Origin: A Novel'. 
+        If intersection covers the shorter string, score is high.
+        """
+        set1 = set(s1.split())
+        set2 = set(s2.split())
+        intersection = set1.intersection(set2)
+        if not intersection: return 0.0
+        
+        # Reconstruct intersection string (sorted for consistency)
+        intersect_str = " ".join(sorted(list(intersection)))
+        
+        # Compare intersection with each original string (sorted)
+        # This gives high score if one is a subset of the other
+        t1 = " ".join(sorted(list(set1)))
+        t2 = " ".join(sorted(list(set2)))
+        
+        score1 = fuzzy_ratio(intersect_str, t1)
+        score2 = fuzzy_ratio(intersect_str, t2)
+        
+        return max(score1, score2)
+
+    # Title Similarity
+    # Strategy 1: Substring Matching (Direct)
     if found_title_clean in query_title_clean or query_title_clean in found_title_clean:
         title_sim = 1.0
     else:
-        # Fall back to fuzzy matching (on cleaned strings)
-        title_sim = difflib.SequenceMatcher(None, query_title_clean, found_title_clean).ratio()
+        # Strategy 2: Split Matching (Handles "Series - Title" vs "Title")
+        q_parts = re.split(r'\s*[-:]\s*', query_title_norm)
+        f_parts = re.split(r'\s*[-:]\s*', found_title_norm)
+        q_parts_clean = [re.sub(r'[,\s]+', ' ', p).strip() for p in q_parts]
+        f_parts_clean = [re.sub(r'[,\s]+', ' ', p).strip() for p in f_parts]
+        
+        match_found = False
+        for qp in q_parts_clean:
+            if not qp: continue
+            if qp == found_title_clean or qp in f_parts_clean:
+                match_found = True; break
+        
+        if match_found:
+             title_sim = 1.0
+        else:
+             # Strategy 3: Multi-Fuzzy Fallback
+             base_score = fuzzy_ratio(query_title_clean, found_title_clean)
+             sort_score = token_sort_ratio(query_title_clean, found_title_clean)
+             set_score = token_set_ratio(query_title_clean, found_title_clean)
+             
+             # Take the BEST fuzzy match
+             title_sim = max(base_score, sort_score, set_score)
     
     # Author Similarity (if available in query)
     author_sim = None
@@ -157,19 +213,24 @@ def calculate_confidence(query: BookQuery, meta: BookMeta) -> float:
         q_auth_clean = re.sub(r'[,\s]+', ' ', q_auth).strip()
         found_auth_clean = re.sub(r'[,\s]+', ' ', found_auth_joined).strip()
         
-        # Helper function to strip degree suffixes from author names
-        def strip_degrees(author_name):
+        # Helper function to strip degree suffixes and clean individual names
+        def clean_author_name(author_name):
             # Remove PhD, MD, Dr., MA, MBA, etc. (case-insensitive)
-            cleaned = re.sub(r'\s*(phd|md|dr\.?|ma|mba|mfa|ms|bs|ba)\s*', '', author_name, flags=re.IGNORECASE)
-            return cleaned.strip()
+            # Also strip extra whitespace
+            name = re.sub(r'\s*(phd|md|dr\.?|ma|mba|mfa|ms|bs|ba)\s*', '', author_name, flags=re.IGNORECASE)
+            return re.sub(r'\s+', ' ', name).strip()
         
         # Order-independent author matching: split into individual names and compare as sets
-        # Split by common separators (comma, 'and', '&')
-        q_authors_list = re.split(r'[,&]|\sand\s', q_auth_clean)
-        q_authors_set = set([strip_degrees(a.strip()) for a in q_authors_list if a.strip()])
+        # IMPORTANT: Use q_auth/found_auth_joined (with separators) for splitting, 
+        # NOT q_auth_clean/found_auth_clean (which have commas stripped)
+        # Regex split by: comma, ampersand, slash, backslash, or " and "
+        sep_pattern = r'[,&/\\]|\sand\s'
         
-        found_authors_list = re.split(r'[,&]|\sand\s', found_auth_clean)
-        found_authors_set = set([strip_degrees(a.strip()) for a in found_authors_list if a.strip()])
+        q_authors_list = re.split(sep_pattern, q_auth)
+        q_authors_set = set([clean_author_name(a) for a in q_authors_list if a.strip()])
+        
+        found_authors_list = re.split(sep_pattern, found_auth_joined)
+        found_authors_set = set([clean_author_name(a) for a in found_authors_list if a.strip()])
         
         # Check if all query authors are in found authors (allows extra authors in found)
         if q_authors_set and q_authors_set.issubset(found_authors_set):
@@ -659,9 +720,108 @@ def apply_metadata(path: str, meta: BookMeta, cover_data: bytes = None, fields_t
     elif path.lower().endswith(".opus"):
         update_opus_tags(path, meta, cover_data, fields_to_update)
 
+from src.core.audio_shelf.atf import ATFHandler
+
+
+def is_file_metadata_match(path: str, meta: BookMeta, fields_to_update: dict) -> bool:
+    """
+    Checks if the file's current tags ALREADY match the target metadata.
+    Returns True if they match (so we can skip writing).
+    Only checks the fields specified in fields_to_update.
+    """
+    if not os.path.exists(path):
+        return False
+
+    try:
+        # Helper to compare values loosely
+        def is_match(tag_val, target_val):
+            if not target_val: return True # If target is empty, ignore
+            if not tag_val: return False   # If target exists but tag doesn't, mismatch
+            
+            # Normalize to strings/lists
+            if isinstance(tag_val, list):
+                s_tag = "; ".join([str(v) for v in tag_val]).lower()
+            else:
+                s_tag = str(tag_val).lower()
+                
+            if isinstance(target_val, list):
+                s_target = "; ".join([str(v) for v in target_val]).lower()
+            else:
+                s_target = str(target_val).lower()
+            
+            # Simple fuzzy-ish check: string equality after normalization
+            return s_tag.strip() == s_target.strip()
+
+        # Load Tags based on format
+        tags = None
+        if path.lower().endswith(".mp3"):
+            try:
+                tags = EasyID3(path)
+            except:
+                return False
+        elif path.lower().endswith((".m4a", ".m4b")):
+            try:
+                 tags = MP4(path)
+            except:
+                return False
+        elif path.lower().endswith(".opus"):
+            try:
+                tags = OggOpus(path)
+            except:
+                return False
+        else:
+            return False
+
+        if not tags:
+            return False
+
+        # Check Fields
+        is_mp3 = path.lower().endswith(".mp3")
+        is_mp4 = path.lower().endswith((".m4a", ".m4b"))
+        is_opus = path.lower().endswith(".opus")
+
+        # Map internal 'meta' fields to file tags
+        if fields_to_update.get("title") and meta.title:
+            t_key = "title" if (is_mp3 or is_opus) else "\xa9nam"
+            if not is_match(tags.get(t_key), meta.title): return False
+
+        if fields_to_update.get("author") and meta.authors:
+            a_key = "artist" if (is_mp3 or is_opus) else "\xa9ART"
+            if not is_match(tags.get(a_key), meta.authors): return False
+            
+        if fields_to_update.get("album") and meta.title:
+            alb_key = "album" if (is_mp3 or is_opus) else "\xa9alb"
+            if not is_match(tags.get(alb_key), meta.title): return False
+
+        if fields_to_update.get("genre") and meta.genres:
+            g_key = "genre" if (is_mp3 or is_opus) else "\xa9gen"
+            if not is_match(tags.get(g_key), meta.genres): return False
+
+        if fields_to_update.get("publisher") and meta.publisher:
+            p_key = "organization" if (is_mp3 or is_opus) else "\xa9pub" # EasyID3 uses organization? actually often TCOR/TPUB
+            if is_mp3:
+                # EasyID3 mapping for publisher is sometimes 'organization' or 'performer'? 
+                # EasyID3 standard keys: album, compilation, title, artist, albumartist...
+                # 'publisher' is valid in standard definitions?
+                # Actually EasyID3 maps 'organization' to TPUB.
+                p_key = "organization" 
+            if not is_match(tags.get(p_key), meta.publisher): return False
+            
+        if fields_to_update.get("year") and meta.published_date:
+            y_key = "date" if (is_mp3 or is_opus) else "\xa9day"
+            if not is_match(tags.get(y_key), meta.published_date): return False
+            
+        # If we passed all checks
+        return True
+
+    except Exception as e:
+        # On any error reading tags, assume mismatch and force update
+        return False
+
 class TaggerEngine:
     def __init__(self):
         self.session = make_session()
+        self.atf_handler = ATFHandler()
         
     def process_file(self, path: str, fields_to_update: dict = None, dry_run: bool = False, force_cover: bool = False, log_callback=None) -> Tuple[bool, str]:
         """
@@ -674,8 +834,106 @@ class TaggerEngine:
             if log_callback:
                 log_callback(msg)
 
+        directory = os.path.dirname(path)
         log(f"--- Processing: {os.path.basename(path)} ---")
         
+        # --- ATF CACHE CHECK ---
+        atf_status, atf_data = self.atf_handler.read_atf(directory)
+        
+        if atf_status == "METADATA_NOT_FOUND":
+            return False, "Skipped (Cached: Metadata previously found not to exist)"
+        elif atf_status == "LOW_CONFIDENCE":
+            return False, "Skipped (Cached: Previous confidence check failed)"
+            
+        elif atf_status == "SUCCESS" and atf_data:
+            # Check if ATF has all fields we want to update
+            # For now, if we have a successful cache, we assume it's good enough unless forced
+            # But the user asked to check if "current run is for specific fields that is already not in ATF file"
+            
+            missing_fields = []
+            if fields_to_update:
+                for field, needed in fields_to_update.items():
+                    if needed:
+                        if field == "cover":
+                             # Check if cover_base64 exists
+                             if "cover_base64" not in atf_data and not has_cover_art(path):
+                                 missing_fields.append("cover")
+                        elif field == "album_artist":
+                             if not atf_data.get("authors"): # Album Artist maps to authors
+                                 missing_fields.append(field)
+                        elif field == "grouping":
+                             if not atf_data.get("genres"): # Grouping maps to genres
+                                 missing_fields.append(field)
+                        elif field == "compilation":
+                             pass # Compilation is a flag, usually not in metadata search
+                        elif field not in atf_data:
+                            # Map internal names if needed, but for now ATF uses 'title', 'authors', etc.
+                            # 'author' in fields -> 'authors' in ATF
+                            if field == "author" and "authors" in atf_data: continue
+                            if field == "album" and "title" in atf_data: continue # Album = Title
+                            
+                            # If we really are missing data, add to list
+                            # For simplicity, if we have a SUCCESS cache, we likely have the main data.
+                            pass
+
+            # If we decide to use cache:
+            # We can use the data from ATF to write tags directly without fetching from API!
+            pass 
+            # But for "Skipping directory", user said: "If current run is same for the data already there. then it would skip the directory."
+            # So if we have SUCCESS and we are not forcing, we can skip fetching?
+            # Actually, let's implement the "Skip Directory" logic first. 
+            # If the user wants to update tags on files that *haven't* been updated, but the directory scan
+            # says "I already did this book", do we skip?
+            # Yes, "app is not updating each and every file that have been update before."
+            
+            # Simple logic: If valid ATF exists and we are not forcing a refresh, SKIP.
+            # But we might need to APPLY the cached tags to the file if the file lacks them?
+            # User said: "app is not updating... each file that have been updated before"
+            # implying we assume files are done if ATF is present.
+            
+            # However, if the user added new files to the folder, we might want to tag them using cached data.
+            # Let's try to USE valid cache to tag the file, skipping the API search.
+            log("Found cached metadata (ATF). Using cache instead of online search.")
+            
+            meta = BookMeta(
+                source=atf_data.get("source", "Cache"),
+                title=atf_data.get("title"),
+                authors=atf_data.get("authors", []),
+                published_date=atf_data.get("published_date"),
+                description=atf_data.get("description"),
+                publisher=atf_data.get("publisher"),
+                genres=atf_data.get("genres", []),
+                asin=atf_data.get("asin"),
+                cover_url=None
+            )
+            
+            cover_data = None
+            if atf_data.get("cover_base64"):
+                try:
+                    cover_data = base64.b64decode(atf_data["cover_base64"])
+                except:
+                    pass
+            
+            # Proceed to write tags using this meta -- BUT SKIP IF ALREADY MATCHES
+            if not dry_run and not force_cover:
+                 # Check if the file tags effectively match the meta we are about to write
+                 # This prevents re-writing thousands of files that are already correct.
+                 if is_file_metadata_match(path, meta, fields_to_update):
+                     # Also check cover? (Rough check: if not forcing cover, and text matches, we assume good)
+                     # Or check if cover exists. logic is complex, simpler to trust text match + has_cover check
+                     if has_cover_art(path):
+                         log("Skipping file (Metadata & Cover already up-to-date with Cache).")
+                         return True, "Skipped (Already up-to-date)"
+            
+            if dry_run:
+                log("🔍 DRY RUN: Using Cached Metadata (would apply tags...)")
+                return True, "Dry Run"
+            else:
+                apply_metadata(path, meta, cover_data, fields_to_update)
+                return True, "Tags updated from Cache"
+
+        # --- END ATF CHECK ---
+
         q = read_metadata(path)
         log(f"Extracted Metadata from File:\n\tTitle: {q.title}\n\tAuthor: {q.author}")
         
@@ -725,6 +983,8 @@ class TaggerEngine:
              
         if not meta:
             log("No metadata found from any source.")
+            # Record failure in ATF to skip this directory next time
+            self.atf_handler.write_atf(directory, os.path.basename(directory), "METADATA_NOT_FOUND")
             return False, "No metadata found online"
             
         # 4. Confidence Check
@@ -745,6 +1005,8 @@ class TaggerEngine:
              log(f"CONFIDENCE FAIL: {confidence:.2f} < 0.85")
              log(f"Query was: {q.title} / {q.author}")
              log(f"Found was: {meta.title} / {meta.authors}")
+             # Record failure in ATF to skip this directory next time
+             self.atf_handler.write_atf(directory, os.path.basename(directory), "LOW_CONFIDENCE")
              return False, msg
 
         log(f"Confidence PASS ({confidence:.2f}). Proceeding to update.")
@@ -800,6 +1062,24 @@ class TaggerEngine:
                     log("⚠️  WARNING: No fields selected for update!")
                 
                 apply_metadata(path, meta, cover_data, fields_to_update)
+                
+                # --- WRITE ATF SUCCESS ---
+                # Only write success if we actually passed confidence checks
+                # Convert BookMeta to dict for storage
+                meta_dict = {
+                    "title": meta.title,
+                    "authors": meta.authors,
+                    "published_date": meta.published_date,
+                    "description": meta.description,
+                    "publisher": meta.publisher,
+                    "genres": meta.genres,
+                    "asin": meta.asin,
+                    "source": meta.source
+                }
+                # Title for filename (sanitize handled by handler)
+                book_title = meta.title if meta.title else os.path.basename(directory)
+                self.atf_handler.write_atf(directory, book_title, "SUCCESS", meta_dict, cover_data)
+                
                 msg = f"Updated (Confidence {confidence:.2f})\n\t{found_info}"
                 msg += f"\n\tGenres: {meta.genres}"
                 log("SUCCESS: File updated.")

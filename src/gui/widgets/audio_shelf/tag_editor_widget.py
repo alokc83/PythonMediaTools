@@ -346,15 +346,38 @@ class TagEditorWidget(QWidget):
         self.progress_bar.setValue(current)
 
     def log_msg(self, msg):
-        if "[FAILED]" in msg:
-            # efficient html styling
-            formatted = f'<span style="color: #ff4444; font-weight: bold;">{msg}</span>'
-            self.log_area.append(formatted)
-        elif "[SUCCESS]" in msg:
-            formatted = f'<span style="color: #00ff00; font-weight: bold;">{msg}</span>'
-            self.log_area.append(formatted)
-        else:
-            self.log_area.append(msg)
+        msg_str = str(msg)
+        # Define styles
+        green = 'color: #00e676; font-weight: bold;'
+        red = 'color: #ff5252; font-weight: bold;'
+        orange = 'color: #ff9800;'
+        blue = 'color: #40c4ff;'
+        
+        lower_msg = msg_str.lower()
+        
+        # Color Logic
+        if "success" in lower_msg or "updated" in lower_msg:
+             if "skipped" not in lower_msg: # "Skipped (Already up-to-date)" is not "Success" green usually? 
+                 # Actually user said "Success line should be green".
+                 # My tagger emits "[SUCCESS]"
+                 self.log_area.append(f'<span style="{green}">{msg_str}</span>')
+                 return
+
+        if "failed" in lower_msg or "error" in lower_msg or "confidence fail" in lower_msg:
+            self.log_area.append(f'<span style="{red}">{msg_str}</span>')
+            return
+            
+        if "skipped" in lower_msg:
+             # Make skipped orange/yellow to differentiate from hard errors
+             self.log_area.append(f'<span style="{orange}">{msg_str}</span>')
+             return
+
+        if "processing:" in lower_msg:
+            self.log_area.append(f'<br><span style="{blue}">{msg_str}</span>')
+            return
+
+        # Default white
+        self.log_area.append(msg_str)
 
     def finished(self):
         self.run_btn.setEnabled(True)

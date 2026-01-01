@@ -50,6 +50,7 @@ class SidebarWidget(QWidget):
         self.add_nav_btn("Rename to Title", 5)
         self.add_nav_btn("Genre Updater", 11)
         self.add_nav_btn("Mass Compare", 10)
+        self.add_nav_btn("ATF Cleaner", 15)
 
         self.nav_layout.addSpacing(15)
 
