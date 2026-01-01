@@ -629,18 +629,25 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
         tags.add(TPUB(encoding=3, text=[meta.publisher]))
     if meta.language:
         tags.add(TLAN(encoding=3, text=[meta.language]))
-    if fields_to_update.get("description") and meta.description:
+    # Description - tri-state
+    desc_action = fields_to_update.get("description", 'skip')
+    if desc_action == 'write' and meta.description:
         tags.add(COMM(encoding=3, lang="eng", desc="Description", text=[meta.description]))
-    if fields_to_update.get("grouping"):
+    elif desc_action == 'delete':
+        tags.delall("COMM")
+    # Grouping - tri-state
+    grp_action = fields_to_update.get("grouping", 'skip')
+    if grp_action == 'write':
         if meta.grouping:
-            # Use series name(s) for grouping
-            grp_str = "; ".join(meta.grouping)
-            tags.add(TIT1(encoding=3, text=[grp_str]))
-        else:
-            tags.delall("TIT1")
-    if fields_to_update.get("compilation"):
-        # Mark as compilation (1 = yes, 0 = no)
+            tags.add(TIT1(encoding=3, text=meta.grouping))
+    elif grp_action == 'delete':
+        tags.delall("TIT1")
+    # Compilation - tri-state
+    comp_action = fields_to_update.get("compilation", 'skip')
+    if comp_action == 'write':
         tags.add(TCMP(encoding=3, text=["1"]))
+    elif comp_action == 'delete':
+        tags.delall("TCMP")
     
     # Genre Update
     if fields_to_update.get("genre") and meta.genres:
@@ -651,8 +658,9 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     tags.delall("TRCK")  # Track number
     tags.delall("TPOS")  # Disc number
 
-    # Cover Art
-    if fields_to_update.get("cover") and cover_data:
+    # Cover Art - tri-state
+    cover_action = fields_to_update.get("cover", 'skip')
+    if cover_action == 'write' and cover_data:
         tags.delall("APIC")
         tags.add(APIC(
             encoding=3,
@@ -661,6 +669,8 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
             desc='Cover',
             data=cover_data
         ))
+    elif cover_action == 'delete':
+        tags.delall("APIC")
     
     tags.save(path, v2_version=3)
 
@@ -682,15 +692,25 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
         tags["\xa9day"] = [meta.published_date]
     if fields_to_update.get("publisher") and meta.publisher:
         tags["\xa9pub"] = [meta.publisher]
-    if fields_to_update.get("description") and meta.description:
+    # Description - tri-state
+    desc_action = fields_to_update.get("description", 'skip')
+    if desc_action == 'write' and meta.description:
         tags["desc"] = [meta.description]
-    if fields_to_update.get("grouping"):
+    elif desc_action == 'delete' and "desc" in tags:
+        del tags["desc"]
+    # Grouping - tri-state
+    grp_action = fields_to_update.get("grouping", 'skip')
+    if grp_action == 'write':
         if meta.grouping:
-            tags["\xa9grp"] = ["; ".join(meta.grouping)]  # Series support
-        elif "\xa9grp" in tags:
-            del tags["\xa9grp"]
-    if fields_to_update.get("compilation"):
-        tags["cpil"] = [True]  # Compilation flag
+            tags["\xa9grp"] = meta.grouping
+    elif grp_action == 'delete' and "\xa9grp" in tags:
+        del tags["\xa9grp"]
+    # Compilation - tri-state
+    comp_action = fields_to_update.get("compilation", 'skip')
+    if comp_action == 'write':
+        tags["cpil"] = [True]
+    elif comp_action == 'delete' and "cpil" in tags:
+        del tags["cpil"]
     
     # Genre
     if fields_to_update.get("genre") and meta.genres:
@@ -702,8 +722,12 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     if "disk" in tags:
         del tags["disk"]  # Disc number
         
-    if fields_to_update.get("cover") and cover_data:
+    # Cover Art - tri-state
+    cover_action = fields_to_update.get("cover", 'skip')
+    if cover_action == 'write' and cover_data:
         tags["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
+    elif cover_action == 'delete' and "covr" in tags:
+        del tags["covr"]
         
     tags.save()
 
@@ -725,15 +749,25 @@ def update_opus_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields
         tags["date"] = meta.published_date
     if fields_to_update.get("publisher") and meta.publisher:
         tags["organization"] = meta.publisher
-    if fields_to_update.get("description") and meta.description:
+    # Description - tri-state
+    desc_action = fields_to_update.get("description", 'skip')
+    if desc_action == 'write' and meta.description:
         tags["description"] = meta.description
-    if fields_to_update.get("grouping"):
+    elif desc_action == 'delete' and "description" in tags:
+        del tags["description"]
+    # Grouping - tri-state
+    grp_action = fields_to_update.get("grouping", 'skip')
+    if grp_action == 'write':
         if meta.grouping:
-            tags["grouping"] = "; ".join(meta.grouping)
-        elif "grouping" in tags:
-            del tags["grouping"]
-    if fields_to_update.get("compilation"):
+            tags["grouping"] = meta.grouping
+    elif grp_action == 'delete' and "grouping" in tags:
+        del tags["grouping"]
+    # Compilation - tri-state
+    comp_action = fields_to_update.get("compilation", 'skip')
+    if comp_action == 'write':
         tags["compilation"] = "1"
+    elif comp_action == 'delete' and "compilation" in tags:
+        del tags["compilation"]
     if fields_to_update.get("genre") and meta.genres:
         tags["genre"] = "; ".join(meta.genres)
     
@@ -1208,6 +1242,12 @@ class TaggerEngine:
                     self.log(f"Fields to update: {', '.join(updating_fields)}")
                 else:
                     self.log("⚠️  WARNING: No fields selected for update!")
+                
+                # Log metadata values being applied
+                if fields_to_update.get('grouping'):
+                    self.log(f"Grouping values to write: {meta.grouping}")
+                if fields_to_update.get('genre'):
+                    self.log(f"Genre values to write: {meta.genres}")
                 
                 apply_metadata(path, meta, cover_data, fields_to_update)
                 

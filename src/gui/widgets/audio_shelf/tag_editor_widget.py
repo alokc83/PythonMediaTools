@@ -120,8 +120,8 @@ class TagEditorWidget(QWidget):
         # Field Selection
         field_group = QGroupBox("Update Fields (Uncheck to skip)")
         field_group.setStyleSheet("""
-            QCheckBox { font-size: 13px; spacing: 8px; }
-            QCheckBox::indicator { width: 18px; height: 18px; }
+            QCheckBox { font-size: 15px; spacing: 8px; }
+            QCheckBox::indicator { width: 22px; height: 22px; }
         """)
         field_layout = QVBoxLayout()
         field_layout.setSpacing(8)  # Moderate spacing
@@ -153,12 +153,16 @@ class TagEditorWidget(QWidget):
         self.publisher_check.setChecked(True)
         self.description_check = QCheckBox("Description/Comments")
         self.description_check.setChecked(True)
+        self.description_check.setTristate(True)  # Enable tri-state
         self.cover_check = QCheckBox("Cover Art")
         self.cover_check.setChecked(True)
+        self.cover_check.setTristate(True)  # Enable tri-state
         self.grouping_check = QCheckBox("Grouping")
         self.grouping_check.setChecked(False)  # Optional field
+        self.grouping_check.setTristate(True)  # Enable tri-state
         self.compilation_check = QCheckBox("Compilation")
         self.compilation_check.setChecked(False)  # Optional field
+        self.compilation_check.setTristate(True)  # Enable tri-state
         
         # Store all field checkboxes for easy access
         self.field_checkboxes = [
@@ -353,6 +357,16 @@ class TagEditorWidget(QWidget):
     def start_tagging(self):
         if not self.files: return
         
+        # Helper function to map checkbox tri-state to action
+        def get_action(checkbox):
+            state = checkbox.checkState()
+            if state == Qt.Checked:
+                return 'write'
+            elif state == Qt.PartiallyChecked:
+                return 'delete'
+            else:  # Qt.Unchecked
+                return 'skip'
+        
         # Collect selected fields
         fields_to_update = {
             "title": self.title_check.isChecked(),
@@ -362,10 +376,10 @@ class TagEditorWidget(QWidget):
             "genre": self.genre_check.isChecked(),
             "year": self.year_check.isChecked(),
             "publisher": self.publisher_check.isChecked(),
-            "description": self.description_check.isChecked(),
-            "cover": self.cover_check.isChecked(),
-            "grouping": self.grouping_check.isChecked(),
-            "compilation": self.compilation_check.isChecked()
+            "description": get_action(self.description_check),
+            "cover": get_action(self.cover_check),
+            "grouping": get_action(self.grouping_check),
+            "compilation": get_action(self.compilation_check)
         }
         
         dry_run = self.dry_run_check.isChecked()
