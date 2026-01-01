@@ -124,7 +124,7 @@ class TagEditorWidget(QWidget):
             QCheckBox::indicator { width: 22px; height: 22px; }
         """)
         field_layout = QVBoxLayout()
-        field_layout.setSpacing(8)  # Moderate spacing
+        field_layout.setSpacing(4)  # Tight spacing
         
         # Master Select All checkbox
         master_layout = QHBoxLayout()
@@ -214,7 +214,7 @@ class TagEditorWidget(QWidget):
         
         # Provider Selection Section
         provider_section = QLabel("Metadata Providers:")
-        provider_section.setStyleSheet("font-weight: bold; color: #00bcd4; margin-top: 15px;")
+        provider_section.setStyleSheet("font-weight: bold; color: #00bcd4; margin-top: 6px;")
         field_layout.addWidget(provider_section)
         
         provider_layout = QHBoxLayout()
@@ -236,7 +236,8 @@ class TagEditorWidget(QWidget):
         
         field_layout.addLayout(provider_layout)
         
-        field_layout.addLayout(provider_layout)
+        # Fixed double addLayout bug
+        # field_layout.addLayout(provider_layout)
         
         field_group.setLayout(field_layout)
         field_group.setMaximumHeight(260)  # Adjusted for 2-column layout
