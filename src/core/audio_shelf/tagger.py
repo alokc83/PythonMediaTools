@@ -1257,10 +1257,13 @@ class TaggerEngine:
                 meta_dict = {
                     "title": meta.title,
                     "authors": meta.authors,
+                    "narrators": meta.narrators,
                     "published_date": meta.published_date,
                     "description": meta.description,
                     "publisher": meta.publisher,
                     "genres": meta.genres,
+                    "tags": meta.tags,
+                    "grouping": meta.grouping,  # Will be [] if deleted via tri-state
                     "asin": meta.asin,
                     "source": meta.source
                 }
