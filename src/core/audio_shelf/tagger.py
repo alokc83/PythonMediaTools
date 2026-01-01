@@ -414,6 +414,7 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
                 if agg:
                      rating_avg = str(agg.get("ratingValue", ""))
                      review_cnt = str(agg.get("reviewCount", ""))
+            except:
                 pass
         
         # Fallback to visual elements if JSON failed
