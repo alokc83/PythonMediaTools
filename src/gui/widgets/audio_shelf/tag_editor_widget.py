@@ -163,15 +163,17 @@ class TagEditorWidget(QWidget):
         self.compilation_check = QCheckBox("Compilation")
         self.compilation_check.setChecked(False)  # Optional field
         self.compilation_check.setTristate(True)  # Enable tri-state
+        self.rating_check = QCheckBox("Rating/Review") # New Rating Checkbox
+        self.rating_check.setChecked(True)
         
         # Store all field checkboxes for easy access
         self.field_checkboxes = [
             self.title_check, self.author_check, self.album_check, self.album_artist_check,
             self.genre_check, self.year_check, self.publisher_check, self.grouping_check,
-            self.description_check, self.cover_check, self.compilation_check
+            self.description_check, self.rating_check, self.cover_check, self.compilation_check
         ]
         
-        # Four-column layout for better space utilization
+        # Five-column layout for better space utilization
         columns_layout = QHBoxLayout()
         
         # Column 1
@@ -195,20 +197,27 @@ class TagEditorWidget(QWidget):
         col3.setSpacing(14)
         col3.addWidget(self.publisher_check)
         col3.addWidget(self.grouping_check)
-        col3.addWidget(self.description_check)
         col3.addStretch()
         
         # Column 4
         col4 = QVBoxLayout()
         col4.setSpacing(14)
-        col4.addWidget(self.cover_check)
-        col4.addWidget(self.compilation_check)
+        col4.addWidget(self.description_check)
+        col4.addWidget(self.rating_check)
         col4.addStretch()
+        
+        # Column 5
+        col5 = QVBoxLayout()
+        col5.setSpacing(14)
+        col5.addWidget(self.cover_check)
+        col5.addWidget(self.compilation_check)
+        col5.addStretch()
         
         columns_layout.addLayout(col1)
         columns_layout.addLayout(col2)
         columns_layout.addLayout(col3)
         columns_layout.addLayout(col4)
+        columns_layout.addLayout(col5)
         
         field_layout.addLayout(columns_layout)
         
@@ -380,7 +389,8 @@ class TagEditorWidget(QWidget):
             "description": get_action(self.description_check),
             "cover": get_action(self.cover_check),
             "grouping": get_action(self.grouping_check),
-            "compilation": get_action(self.compilation_check)
+            "compilation": get_action(self.compilation_check),
+            "rating": self.rating_check.isChecked()
         }
         
         dry_run = self.dry_run_check.isChecked()

@@ -1176,7 +1176,7 @@ class TaggerEngine:
             
         # --- ENHANCE DESCRIPTION WITH RATING ---
         # "⭐️ Rating: 4.8/5 (12,450 reviews)"
-        if meta.rating:
+        if meta.rating and fields_to_update.get("rating", True):
             try:
                 r_val = float(meta.rating)
                 stars = "⭐️" # Default star
