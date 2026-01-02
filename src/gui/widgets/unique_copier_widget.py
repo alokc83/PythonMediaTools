@@ -1,19 +1,31 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QLineEdit, QProgressBar, QTextEdit,
-    QFileDialog, QListWidget
+    QFileDialog, QListWidget, QCheckBox
 )
 from PyQt5.QtCore import Qt
 from ...core.workers.unique_copier_worker import UniqueCopierWorker
 
 class UniqueFileCopierWidget(QWidget):
-    def __init__(self):
+    def __init__(self, settings_manager=None):
         super().__init__()
+        self.settings_manager = settings_manager
         self.worker = None
         self.init_ui()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
+
+        # Header & Toggle
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Unique File Copier"))
+        header_layout.addStretch()
+        
+        self.dashboard_toggle = QCheckBox("Show in Dashboard")
+        self.dashboard_toggle.setChecked(self.get_dashboard_visibility())
+        self.dashboard_toggle.stateChanged.connect(self.toggle_dashboard_visibility)
+        header_layout.addWidget(self.dashboard_toggle)
+        layout.addLayout(header_layout)
         
         # Destination folder selection
         dest_layout = QHBoxLayout()
@@ -109,4 +121,17 @@ class UniqueFileCopierWidget(QWidget):
         self.console.append(message)
         self.console.verticalScrollBar().setValue(
             self.console.verticalScrollBar().maximum()
-        ) 
+        )
+
+    def get_dashboard_visibility(self):
+        if self.settings_manager:
+            # unique copier id is 12
+            val = self.settings_manager.get("dashboard_visible_12")
+            if val is None: return True
+            return str(val).lower() == 'true'
+        return True
+
+    def toggle_dashboard_visibility(self):
+        if self.settings_manager:
+            state = self.dashboard_toggle.isChecked()
+            self.settings_manager.set("dashboard_visible_12", str(state).lower()) 

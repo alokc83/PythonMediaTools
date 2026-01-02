@@ -5,7 +5,7 @@ import json
 from typing import List, Optional, Tuple, Callable
 
 from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3, COMM
+from mutagen.id3 import ID3, COMM, TIT1
 from mutagen.mp4 import MP4
 from mutagen.oggopus import OggOpus
 
@@ -431,23 +431,57 @@ class RatingUpdaterEngine:
                 except:
                     header += f" ({meta.rating_count} reviews)"
         
+        # Calculate Grouping Tag
+        # Logic: 4+: "Book Rated 4+", 3-3.99: "Book Rated 3+", 2-2.99: "Book Rated 2+"
+        # Remove all if < 2
+        rating_val = float(meta.rating)
+        grouping_tag = None
+        if rating_val >= 4.0:
+            grouping_tag = "4+ Rated Books"
+        elif rating_val >= 3.0:
+            grouping_tag = "3+ Rated Books"
+        elif rating_val >= 2.0:
+            grouping_tag = "2+ Rated Books"
+        
         count = 0
         for f in files:
             path = os.path.join(directory, f)
             try:
-                self._apply_rating_to_file(path, header)
+                self._apply_rating_to_file(path, header, grouping_tag)
                 count += 1
             except Exception as e:
                 self.log(f"Failed to update {f}: {e}")
         
-        self.log(f"Updated {count} files with rating header.")
+        self.log(f"Updated {count} files with rating header and grouping tag.")
 
-    def _apply_rating_to_file(self, path: str, new_header: str):
+    def _apply_rating_to_file(self, path: str, new_header: str, grouping_tag: str = None):
         """
-        Reads file, modifies description using Line 1 Rule, saves.
+        Reads file, modifies description using Line 1 Rule, and updates Grouping tag.
         """
         ext = os.path.splitext(path)[1].lower()
         
+        # Logic to update tag list (for Grouping and Genre)
+        def update_tag_list(current_list, new_tag):
+            # 1. Remove ANY existing "Book Rated X+" tags
+            # We look for specific pattern "Book Rated [2345]\+" to be safe
+            clean_list = []
+            if current_list:
+                for item in current_list:
+                    # Clean up if it's a single string with semicolons (often case for Genre)
+                    sub_items = [s.strip() for s in str(item).split(';') if s.strip()]
+                    for sub in sub_items:
+                        # Regex handles: "Book Rated X+", "Books Rated X+", "X+ Rated Books"
+                        if not re.match(r"^(Books? Rated [0-9]+\+|[0-9]+\+ Rated Books?)$", sub, re.IGNORECASE):
+                            clean_list.append(sub)
+            
+            # 2. Add new tag if provided (PREPEND)
+            if new_tag:
+                 # Check if already exists (shouldn't be in clean_list due to regex, but safety check)
+                 if new_tag not in clean_list:
+                     clean_list.insert(0, new_tag)
+            
+            return clean_list
+
         # --- MP3 ---
         if ext == '.mp3':
             audio = ID3(path)
@@ -471,6 +505,23 @@ class RatingUpdaterEngine:
             
             # Save to Comment tag
             audio.add(COMM(encoding=3, lang='eng', desc='', text=[new_comment]))
+            
+            # Grouping (TIT1)
+            current_grouping = []
+            if "TIT1" in audio:
+                current_grouping = audio["TIT1"].text
+            
+            new_grouping = update_tag_list(current_grouping, grouping_tag)
+            
+            if new_grouping:
+                # User preference: Join with semicolon to ensure visibility as "Old; New"
+                grp_str = "; ".join(new_grouping)
+                self.log(f"--> Writing MP3 Grouping: {grp_str}")
+                audio.add(TIT1(encoding=3, text=[grp_str]))
+            elif "TIT1" in audio:
+                self.log(f"--> Removing MP3 Grouping")
+                audio.delall("TIT1")
+                
             audio.save()
 
         # --- MP4 ---
@@ -483,6 +534,27 @@ class RatingUpdaterEngine:
              
              new_comment = self._prepend_rating(old_comment, new_header)
              audio['©cmt'] = [new_comment]
+             
+             # Grouping (\xa9grp)
+             current_grouping = []
+             if "\xa9grp" in audio:
+                 val = audio["\xa9grp"]
+                 if isinstance(val, list):
+                     current_grouping = val
+                 else:
+                     current_grouping = [str(val)]
+                     
+             new_grouping = update_tag_list(current_grouping, grouping_tag)
+             
+             if new_grouping:
+                # User preference: Join with semicolon to ensure visibility as "Old; New"
+                grp_str = "; ".join(new_grouping)
+                self.log(f"--> Writing MP4 Grouping: {grp_str}")
+                audio["\xa9grp"] = [grp_str]
+             elif "\xa9grp" in audio:
+                self.log(f"--> Removing MP4 Grouping")
+                del audio["\xa9grp"]
+
              audio.save()
 
         # --- OPUS ---
@@ -495,6 +567,23 @@ class RatingUpdaterEngine:
                  
              new_comment = self._prepend_rating(old_comment, new_header)
              audio['COMMENT'] = [new_comment]
+             
+             # Grouping (grouping)
+             current_grouping = []
+             if "grouping" in audio:
+                 current_grouping = audio["grouping"] # OggOpus returns list
+                 
+             new_grouping = update_tag_list(current_grouping, grouping_tag)
+             
+             if new_grouping:
+                 # User preference: Join with semicolon to ensure visibility as "Old; New"
+                 grp_str = "; ".join(new_grouping)
+                 self.log(f"--> Writing Opus Grouping: {grp_str}")
+                 audio['grouping'] = [grp_str]
+             elif "grouping" in audio:
+                 self.log(f"--> Removing Opus Grouping")
+                 del audio['grouping']
+             
              audio.save()
 
     def _prepend_rating(self, current_text: str, new_header: str) -> str:

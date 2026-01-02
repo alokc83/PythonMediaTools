@@ -365,7 +365,6 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
         # Simply scrape the page
         r = session.get(url, timeout=10)
         print(f"DEBUG: Status Code: {r.status_code}")
-        print(f"DEBUG: Snippet: {r.text[:500]}")
         if r.status_code != 200:
             return None
             

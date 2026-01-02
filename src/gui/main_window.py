@@ -1,4 +1,3 @@
-
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QStackedWidget, QAction
@@ -6,6 +5,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 
 from src.core.settings_manager import SettingsManager
+from src.gui.services.orchestrator import ToolOrchestrator
 from src.gui.dialogs.settings_dialog import SettingsDialog
 
 # New UI Components
@@ -37,6 +37,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 700) # Enable resizing with constraints
         
         self.settings_manager = SettingsManager()
+        self.orchestrator = ToolOrchestrator()
         
         # Central widget is now a horizontal container
         self.central_widget = QWidget()
@@ -62,24 +63,26 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.content_area)
         
         # Initialize Widgets
-        self.dashboard = DashboardWidget()
+        self.dashboard = DashboardWidget(self.orchestrator, self.settings_manager)
         self.dashboard.navigate_signal.connect(self.handle_navigation)
         
         # Legacy
-        self.mass_compare = MassCompareWidget()
+        self.mass_compare = MassCompareWidget(self.settings_manager)
         self.genre_updater = GenreUpdaterWidget(self.settings_manager)
-        self.unique_copier = UniqueFileCopierWidget()
-        self.bitrate_mover = BitrateMoverWidget()
+        self.unique_copier = UniqueFileCopierWidget(self.settings_manager)
+        self.bitrate_mover = BitrateMoverWidget(self.settings_manager)
 
         # Audio Toolbox
-        self.duplicates_widget = DuplicatesWidget()
-        self.renamer_widget = RenamerWidget()
-        self.flattener_widget = FlattenerWidget()
-        self.organizer_widget = OrganizerWidget()
-        self.pruner_widget = PrunerWidget()
-        self.tag_editor_widget = TagEditorWidget(self.settings_manager)
-        self.atf_cleaner_widget = ATFCleanerWidget()
-        self.rating_updater_widget = RatingUpdaterWidget()
+        self.duplicates_widget = DuplicatesWidget(self.settings_manager)
+        self.renamer_widget = RenamerWidget(self.settings_manager)
+        self.flattener_widget = FlattenerWidget(self.settings_manager)
+        self.organizer_widget = OrganizerWidget(self.settings_manager)
+        self.pruner_widget = PrunerWidget(self.settings_manager)
+        self.tag_editor_widget = TagEditorWidget(self.settings_manager, self.orchestrator)
+        self.atf_cleaner_widget = ATFCleanerWidget(self.settings_manager)
+        # Pass settings_manager first, then orchestrator (or update widget signature)
+        # RatingUpdaterWidget(settings, orchestrator)
+        self.rating_updater_widget = RatingUpdaterWidget(self.settings_manager, self.orchestrator)
         
         # Stack Order Mapping
         # 0: Dashboard

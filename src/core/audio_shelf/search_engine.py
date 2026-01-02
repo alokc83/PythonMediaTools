@@ -249,7 +249,6 @@ def search_duckduckgo_amazon(query: str, limit: int = 3) -> List[str]:
                 if "http" in href:
                      # Remove query params
                      if "?" in href: href = href.split("?")[0]
-                     print(f"DEBUG: Found Amazon Match: {href}")
                      found_urls.append(href)
                      
     except Exception as e:

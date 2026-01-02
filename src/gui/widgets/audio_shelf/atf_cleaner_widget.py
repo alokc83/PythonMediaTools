@@ -1,7 +1,7 @@
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QLineEdit, 
-    QTextEdit, QFileDialog, QHBoxLayout, QMessageBox, QProgressBar
+    QTextEdit, QFileDialog, QHBoxLayout, QMessageBox, QProgressBar, QCheckBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from src.core.audio_shelf.atf_cleaner import ATFCleaner
@@ -43,8 +43,9 @@ class ATFCleanWorker(QThread):
         self._is_running = False
 
 class ATFCleanerWidget(QWidget):
-    def __init__(self):
+    def __init__(self, settings_manager=None):
         super().__init__()
+        self.settings_manager = settings_manager
         self.cleaner = ATFCleaner()
         self.init_ui()
 
@@ -52,9 +53,18 @@ class ATFCleanerWidget(QWidget):
         layout = QVBoxLayout()
 
         # Header
+        header_layout = QHBoxLayout()
         header = QLabel("ATF Cache Cleaner")
         header.setStyleSheet("font-size: 18px; font-weight: bold; margin-bottom: 10px; color: #00bcd4;")
-        layout.addWidget(header)
+        header_layout.addWidget(header)
+        header_layout.addStretch()
+        
+        self.dashboard_toggle = QCheckBox("Show in Dashboard")
+        self.dashboard_toggle.setChecked(self.get_dashboard_visibility())
+        self.dashboard_toggle.stateChanged.connect(self.toggle_dashboard_visibility)
+        header_layout.addWidget(self.dashboard_toggle)
+        
+        layout.addLayout(header_layout)
 
         desc = QLabel("Recursively delete all .atf cache files to force a fresh metadata scan next time.")
         desc.setStyleSheet("color: #aaa; margin-bottom: 15px;")
@@ -140,3 +150,16 @@ class ATFCleanerWidget(QWidget):
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.dir_edit.setEnabled(True)
+
+    def get_dashboard_visibility(self):
+        if self.settings_manager:
+            # atf cleaner id is 15
+            val = self.settings_manager.get("dashboard_visible_15")
+            if val is None: return True
+            return str(val).lower() == 'true'
+        return True
+
+    def toggle_dashboard_visibility(self):
+        if self.settings_manager:
+            state = self.dashboard_toggle.isChecked()
+            self.settings_manager.set("dashboard_visible_15", str(state).lower())
