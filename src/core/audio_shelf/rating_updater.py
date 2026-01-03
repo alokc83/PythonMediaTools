@@ -2,6 +2,7 @@ import os
 import re
 import requests
 import json
+import concurrent.futures
 from typing import List, Optional, Tuple, Callable
 
 from mutagen.easyid3 import EasyID3
@@ -23,9 +24,10 @@ from .search_engine import (
 from .atf import ATFHandler
 
 class RatingUpdaterEngine:
-    def __init__(self, log_callback: Callable[[str], None] = None):
+    def __init__(self, settings_manager=None, log_callback: Callable[[str], None] = None):
         self.session = make_session()
         self.atf_handler = ATFHandler()
+        self.settings = settings_manager # Can be None if run CLI without it, should handle graceful defaults
         self.log_callback = log_callback or (lambda x: None)
 
     def log(self, msg: str):
@@ -49,24 +51,103 @@ class RatingUpdaterEngine:
         total = len(book_dirs)
         self.log(f"Found {total} audio directories to process.")
         
-        # 2. Process each book directory
-        for i, directory in enumerate(book_dirs):
-            self.log(f"\n--- Processing Book {i+1}/{total}: {os.path.basename(directory)} ---")
+        # 2. Process each book directory in parallel
+        # Reduced from 20 to 5 to avoid rate limiting/timeouts from Search Engines
+        self.log(f"Starting parallel processing with 5 workers...")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for i, directory in enumerate(book_dirs):
+                futures.append(executor.submit(self._process_book, directory, i + 1, total))
             
-            try:
-                # Get/Update ATF Metadata (Always fetches fresh as per rule)
-                meta = self._get_or_update_atf(directory)
+            # Wait for all to complete
+            completed_count = 0
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    self.log(f"Thread Error: {e}")
                 
-                if meta and meta.rating:
-                    self._update_files_in_dir(directory, meta)
-                else:
-                    self.log("Skipping files: No rating found for this book.")
-                    
-            except Exception as e:
-                self.log(f"Error processing {directory}: {e}")
+                completed_count += 1
+                if progress_callback:
+                    progress_callback(completed_count, total)
+
+    def _process_book(self, directory, idx, total):
+        """
+        Helper method to process a single book directory.
+        """
+        try:
+            self.log(f"\n--- Processing Book {idx}/{total}: {os.path.basename(directory)} ---")
             
-            if progress_callback:
-                progress_callback(i + 1, total)
+            # Smart Skip: Check if already rated
+            if self._is_already_rated(directory):
+                 self.log(f"Skipping {os.path.basename(directory)}: Already contains 'X+ Rated Books' tag.")
+                 return
+
+            # Get/Update ATF Metadata (Always fetches fresh as per rule)
+            meta = self._get_or_update_atf(directory)
+            
+            if meta and meta.rating:
+                self._update_files_in_dir(directory, meta)
+            else:
+                self.log(f"Skipping files in {os.path.basename(directory)}: No rating found.")
+                
+        except Exception as e:
+            self.log(f"Error processing {directory}: {e}")
+
+    def _is_already_rated(self, directory: str) -> bool:
+        """
+        Checks if the first found audio file in the directory already has an "X+ Rated Books" tag.
+        """
+        try:
+             # Find first audio file
+             extensions = ('.mp3', '.m4a', '.m4b', '.opus', '.ogg')
+             target_file = None
+             for f in os.listdir(directory):
+                 if f.lower().endswith(extensions) and not f.startswith("._"):
+                     target_file = os.path.join(directory, f)
+                     break
+             
+             if not target_file: return False # Treat as not rated if no files
+             
+             ext = os.path.splitext(target_file)[1].lower()
+             
+             # Check based on extension
+             if ext == '.mp3':
+                 from mutagen.id3 import ID3
+                 audio = ID3(target_file)
+                 if "TIT1" in audio:
+                     # TIT1 is list of strings
+                     for item in audio["TIT1"].text:
+                         if re.search(r"^[0-9]+\+ Rated Books", str(item), re.IGNORECASE):
+                             return True
+                             
+             elif ext in ('.m4a', '.m4b'):
+                 from mutagen.mp4 import MP4
+                 audio = MP4(target_file)
+                 if "\xa9grp" in audio:
+                     val = audio["\xa9grp"]
+                     # Can be list or string
+                     if isinstance(val, list):
+                         val = val[0]
+                     
+                     if re.search(r"^[0-9]+\+ Rated Books", str(val), re.IGNORECASE):
+                        return True
+                        
+             elif ext in ('.opus', '.ogg'):
+                 from mutagen.oggopus import OggOpus
+                 audio = OggOpus(target_file)
+                 if "grouping" in audio:
+                     val = audio["grouping"] 
+                     # List
+                     for item in val:
+                        if re.search(r"^[0-9]+\+ Rated Books", str(item), re.IGNORECASE):
+                             return True
+                             
+        except Exception:
+            return False # On error, assume not rated
+            
+        return False
 
     def _find_audio_directories(self, root_path: str) -> List[str]:
         """
@@ -146,113 +227,130 @@ class RatingUpdaterEngine:
         found_ratings = []  # Initialize for rating collection from all sources
         
         # Provider 1: Audnexus (Audible) - Primary
-        self.log("Step 1: Trying Audnexus (Audible)...")
-        asin, _ = audible_find_asin(self.session, query)
-        if asin:
-            self.log(f"Found ASIN via Internal Search: {asin}")
-            audnexus_meta = provider_audnexus_by_asin(self.session, asin)
-            if audnexus_meta:
-                meta_results.append(audnexus_meta)
-                rc = self._parse_count(audnexus_meta.rating_count)
-                self.log(f"✅ Audnexus Success! Found Rating: {audnexus_meta.rating} ({rc} votes)")
-                
-                # Check for low count, force scrape verification
-                try:
+        use_audnexus = self.settings.get('metadata_use_audnexus', True) if self.settings else True
+        if use_audnexus:
+            self.log("Step 1: Trying Audnexus (Audible)...")
+            asin, _ = audible_find_asin(self.session, query)
+            if asin:
+                self.log(f"Found ASIN via Internal Search: {asin}")
+                audnexus_meta = provider_audnexus_by_asin(self.session, asin)
+                if audnexus_meta:
+                    meta_results.append(audnexus_meta)
                     rc = self._parse_count(audnexus_meta.rating_count)
-                    if rc < 50:
-                        self.log("Audnexus count low. Attempting direct Audible scrape verification...")
-                        url = f"https://www.audible.com/pd/{asin}"
+                    self.log(f"✅ Audnexus Success! Found Rating: {audnexus_meta.rating} ({rc} votes)")
+                    
+                    # Check for low count, force scrape verification
+                    try:
+                        rc = self._parse_count(audnexus_meta.rating_count)
+                        if rc < 50:
+                            self.log("Audnexus count low. Attempting direct Audible scrape verification...")
+                            url = f"https://www.audible.com/pd/{asin}"
+                            scrape_meta = provider_audible_scrape(self.session, url)
+                            if scrape_meta:
+                                 src = self._parse_count(scrape_meta.rating_count)
+                                 if src > rc:
+                                     self.log(f"✅ Scrape Upgrade! Audnexus count {rc} -> {src}")
+                                     # Update existing meta logic instead of removing
+                                     audnexus_meta.rating_count = src
+                                     audnexus_meta.rating = scrape_meta.rating 
+                                 else:
+                                     self.log("Scrape verified count (no improvement).")
+                    except Exception as e:
+                        self.log(f"Verification warning: {e}")
+
+            
+            # Fallback: DuckDuckGo external search if internal fails
+            if not meta_results:
+                self.log("Internal search failed. Trying Robust External Search (DuckDuckGo)...")
+                query_str = f"{query.title} {query.author}".strip()
+                found_urls = search_duckduckgo_audible(query_str)
+                
+                for url in found_urls:
+                    self.log(f"Found candidate URL: {url}")
+                    # Try to extract ASIN first for Audnexus (Cleanest Data)
+                    found_asin = extract_asin_from_url(url)
+                    if found_asin:
+                        self.log(f"Extracted ASIN: {found_asin}. Querying Audnexus...")
+                        audnexus_meta = provider_audnexus_by_asin(self.session, found_asin)
+                        if audnexus_meta:
+                            self.log("Audnexus Success!")
+                            meta_results.append(audnexus_meta)
+                            break
+                    
+                    # If no ASIN or Audnexus failed, Try Direct Scrape
+                    if not meta_results:
+                        self.log("Audnexus failed. Fallback: Direct HTML Scraping...")
                         scrape_meta = provider_audible_scrape(self.session, url)
                         if scrape_meta:
-                             src = self._parse_count(scrape_meta.rating_count)
-                             if src > rc:
-                                 self.log(f"✅ Scrape Upgrade! Audnexus count {rc} -> {src}")
-                                 # Update existing meta logic instead of removing
-                                 audnexus_meta.rating_count = src
-                                 audnexus_meta.rating = scrape_meta.rating 
-                             else:
-                                 self.log("Scrape verified count (no improvement).")
-                except Exception as e:
-                    self.log(f"Verification warning: {e}")
-
-        
-        # Fallback: DuckDuckGo external search if internal fails
-        if not meta_results:
-            self.log("Internal search failed. Trying Robust External Search (DuckDuckGo)...")
-            query_str = f"{query.title} {query.author}".strip()
-            found_urls = search_duckduckgo_audible(query_str)
-            
-            for url in found_urls:
-                self.log(f"Found candidate URL: {url}")
-                # Try to extract ASIN first for Audnexus (Cleanest Data)
-                found_asin = extract_asin_from_url(url)
-                if found_asin:
-                    self.log(f"Extracted ASIN: {found_asin}. Querying Audnexus...")
-                    audnexus_meta = provider_audnexus_by_asin(self.session, found_asin)
-                    if audnexus_meta:
-                        self.log("Audnexus Success!")
-                        meta_results.append(audnexus_meta)
-                        break
-                
-                # If no ASIN or Audnexus failed, Try Direct Scrape
-                if not meta_results:
-                    self.log("Audnexus failed. Fallback: Direct HTML Scraping...")
-                    scrape_meta = provider_audible_scrape(self.session, url)
-                    if scrape_meta:
-                        self.log("Direct Scraping Success!")
-                        meta_results.append(scrape_meta)
-                        break
+                            self.log("Direct Scraping Success!")
+                            meta_results.append(scrape_meta)
+                            break
+        else:
+            self.log("Skipping Audnexus (Disabled in Settings).")
         
         # Provider 2: Google Books (Enrichment)
-        self.log("Step 2: Querying Google Books for enrichment...")
-        google_meta = google_books_search(self.session, query)
-        if google_meta:
-            meta_results.append(google_meta)
-            self.log(f"Google Books: Found '{google_meta.title}'")
+        use_google = self.settings.get('metadata_use_google', True) if self.settings else True
+        if use_google:
+            self.log("Step 2: Querying Google Books for enrichment...")
+            api_key = self.settings.get('google_api_key', '') if self.settings else None
+            google_meta = google_books_search(self.session, query, api_key=api_key)
+            if google_meta:
+                meta_results.append(google_meta)
+                self.log(f"Google Books: Found '{google_meta.title}'")
+            else:
+                self.log("Google Books: No results")
         else:
-            self.log("Google Books: No results")
+            self.log("Skipping Google Books (Disabled in Settings).")
         
         # Provider 3: Goodreads (Scraping)
-        self.log("Step 3: Trying Goodreads (Scraping)...")
-        gr_found = False
-        try:
-            query_str = f"{query.title} {query.author}".strip()
-            # Use Direct Search instead of DDG
-            gr_urls = search_goodreads_direct(query_str)
-            for url in gr_urls:
-                self.log(f"Scanning Goodreads URL: {url}")
-                gr_data = scrape_goodreads_rating(self.session, url)
-                if gr_data:
-                    self.log(f"✅ Goodreads Success! Found Rating: {gr_data['rating']} ({gr_data['count']:,} votes)")
-                    gr_data["source"] = "Goodreads"
-                    gr_data["count"] = self._parse_count(gr_data["count"])
-                    found_ratings.append(gr_data)
-                    gr_found = True
-                    break
-            if not gr_found and not gr_urls:
-                 self.log(f"❌ Goodreads Search failed. No valid URLs found despite direct search.")
-                 
-        except Exception as e:
-            self.log(f"Goodreads Error: {e}")
+        use_goodreads = self.settings.get('metadata_use_goodreads', True) if self.settings else True
+        if use_goodreads:
+            self.log("Step 3: Trying Goodreads (Scraping)...")
+            gr_found = False
+            try:
+                query_str = f"{query.title} {query.author}".strip()
+                # Use Direct Search instead of DDG
+                gr_urls = search_goodreads_direct(query_str)
+                for url in gr_urls:
+                    self.log(f"Scanning Goodreads URL: {url}")
+                    gr_data = scrape_goodreads_rating(self.session, url)
+                    if gr_data:
+                        self.log(f"✅ Goodreads Success! Found Rating: {gr_data['rating']} ({gr_data['count']:,} votes)")
+                        gr_data["source"] = "Goodreads"
+                        gr_data["count"] = self._parse_count(gr_data["count"])
+                        found_ratings.append(gr_data)
+                        gr_found = True
+                        break
+                if not gr_found and not gr_urls:
+                     self.log(f"❌ Goodreads Search failed. No valid URLs found despite direct search.")
+                     
+            except Exception as e:
+                self.log(f"Goodreads Error: {e}")
+        else:
+            self.log("Skipping Goodreads (Disabled in Settings).")
 
         # Provider 4: Amazon (Scraping)
         # Added per request for 4th source
-        self.log("Step 4: Trying Amazon (Scraping)...")
-        amz_found = False
-        try:
-             query_str = f"{query.title} {query.author} book"
-             amz_urls = search_duckduckgo_amazon(query_str)
-             for url in amz_urls:
-                 self.log(f"Scanning Amazon URL: {url}")
-                 amz_data = scrape_amazon_rating(self.session, url)
-                 if amz_data:
-                      self.log(f"✅ Amazon Success! Found Rating: {amz_data['rating']} ({amz_data['count']:,} ratings)")
-                      amz_data['source'] = "Amazon"
-                      found_ratings.append(amz_data)
-                      amz_found = True
-                      break
-        except Exception as e:
-             self.log(f"Amazon Error: {e}")
+        use_amazon = self.settings.get('metadata_use_amazon', True) if self.settings else True
+        if use_amazon:
+            self.log("Step 4: Trying Amazon (Scraping)...")
+            amz_found = False
+            try:
+                 query_str = f"{query.title} {query.author} book"
+                 amz_urls = search_duckduckgo_amazon(query_str)
+                 for url in amz_urls:
+                     self.log(f"Scanning Amazon URL: {url}")
+                     amz_data = scrape_amazon_rating(self.session, url)
+                     if amz_data:
+                          self.log(f"✅ Amazon Success! Found Rating: {amz_data['rating']} ({amz_data['count']:,} ratings)")
+                          amz_data['source'] = "Amazon"
+                          found_ratings.append(amz_data)
+                          amz_found = True
+                          break
+            except Exception as e:
+                 self.log(f"Amazon Error: {e}")
+        else:
+            self.log("Skipping Amazon (Disabled in Settings).")
              
         # If no metadata found from ANY provider
         if not meta_results and not gr_found and not amz_found:
@@ -444,15 +542,37 @@ class RatingUpdaterEngine:
             grouping_tag = "2+ Rated Books"
         
         count = 0
-        for f in files:
-            path = os.path.join(directory, f)
-            try:
-                self._apply_rating_to_file(path, header, grouping_tag)
-                count += 1
-            except Exception as e:
-                self.log(f"Failed to update {f}: {e}")
         
-        self.log(f"Updated {count} files with rating header and grouping tag.")
+        # Determine strict sequential or parallel based on file count
+        # For small number of files, overhead of threads might not be worth it
+        # But for 7000 files, it is essential.
+        if len(files) > 10:
+             self.log(f"Updating {len(files)} files in parallel...")
+             with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 10) as file_executor:
+                 futures = []
+                 for f in files:
+                     path = os.path.join(directory, f)
+                     futures.append(file_executor.submit(self._safe_apply_rating, path, header, grouping_tag))
+                 
+                 for future in concurrent.futures.as_completed(futures):
+                     if future.result():
+                         count += 1
+        else:
+            # Sequential for small batches
+            for f in files:
+                path = os.path.join(directory, f)
+                if self._safe_apply_rating(path, header, grouping_tag):
+                    count += 1
+        
+        self.log(f"Updated {count} files with rating header and grouping tag in {os.path.basename(directory)}.")
+
+    def _safe_apply_rating(self, path, header, grouping_tag):
+        try:
+            self._apply_rating_to_file(path, header, grouping_tag)
+            return True
+        except Exception as e:
+            self.log(f"Failed to update {os.path.basename(path)}: {e}")
+            return False
 
     def _apply_rating_to_file(self, path: str, new_header: str, grouping_tag: str = None):
         """
@@ -527,18 +647,18 @@ class RatingUpdaterEngine:
         # --- MP4 ---
         elif ext in ('.m4a', '.m4b'):
              audio = MP4(path)
-             # Use ©cmt (Comment) tag for rating data
+             # Use \u00a9cmt (Comment) tag for rating data
              old_comment = ""
-             if '©cmt' in audio:
-                 old_comment = audio['©cmt'][0]
+             if '\u00a9cmt' in audio:
+                 old_comment = audio['\u00a9cmt'][0]
              
              new_comment = self._prepend_rating(old_comment, new_header)
-             audio['©cmt'] = [new_comment]
+             audio['\u00a9cmt'] = [new_comment]
              
-             # Grouping (\xa9grp)
+             # Grouping (\u00a9grp)
              current_grouping = []
-             if "\xa9grp" in audio:
-                 val = audio["\xa9grp"]
+             if "\u00a9grp" in audio:
+                 val = audio["\u00a9grp"]
                  if isinstance(val, list):
                      current_grouping = val
                  else:
@@ -550,12 +670,22 @@ class RatingUpdaterEngine:
                 # User preference: Join with semicolon to ensure visibility as "Old; New"
                 grp_str = "; ".join(new_grouping)
                 self.log(f"--> Writing MP4 Grouping: {grp_str}")
-                audio["\xa9grp"] = [grp_str]
-             elif "\xa9grp" in audio:
+                audio["\u00a9grp"] = [grp_str]
+             elif "\u00a9grp" in audio:
                 self.log(f"--> Removing MP4 Grouping")
-                del audio["\xa9grp"]
+                del audio["\u00a9grp"]
 
              audio.save()
+             
+             # Verify Write
+             try:
+                 check = MP4(path)
+                 if "\u00a9grp" in check:
+                     self.log(f"    [Verify] Saved Grouping: {check['\u00a9grp'][0]}")
+                 else:
+                     self.log(f"    [Verify] No Grouping tag found after save.")
+             except:
+                 pass
 
         # --- OPUS ---
         elif ext in ('.opus', '.ogg'):

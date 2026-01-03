@@ -361,10 +361,10 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
 
 def provider_audible_scrape(session: requests.Session, url: str) -> Optional[BookMeta]:
     try:
-        print(f"DEBUG: Scrape URL: {url}")
+
         # Simply scrape the page
         r = session.get(url, timeout=10)
-        print(f"DEBUG: Status Code: {r.status_code}")
+
         if r.status_code != 200:
             return None
             
@@ -373,15 +373,16 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
         # 1. Title: <h1 slot="title">Project Hail Mary</h1>
         title = ""
         h1 = soup.select_one("h1[slot='title']")
-        print(f"DEBUG: H1 (slot): {h1}")
+
         if not h1:
              # Fallback to standard h1
              h1 = soup.select_one("h1.bc-heading")
-             print(f"DEBUG: H1 (heading): {h1}")
+             # Fallback to standard h1
+             h1 = soup.select_one("h1.bc-heading")
         if h1:
             title = h1.get_text().strip()
         
-        print(f"DEBUG: Extracted Title: '{title}'")
+
         if not title: return None
         
         # 2. Metadata from JSON (Best Source)
@@ -472,8 +473,7 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             rating=str(data.get("aggregateRating", {}).get("ratingValue") or ""),
             rating_count=str(data.get("aggregateRating", {}).get("reviewCount") or "")
         )
-    except Exception as e:
-        print(f"DEBUG: Scrape Error: {e}")
+    except Exception:
         return None
 
 def google_books_search(session: requests.Session, q: BookQuery, api_key: str = None) -> Optional[BookMeta]:
@@ -618,43 +618,51 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     except Exception:
         tags = ID3()
     
-    # Text Tags (conditional)
-    if fields_to_update.get("title") and meta.title:
-        tags.add(TIT2(encoding=3, text=[meta.title]))
-    if fields_to_update.get("author") and meta.authors:
-        tags.add(TPE1(encoding=3, text=meta.authors))  # Artist
-    if fields_to_update.get("album") and meta.title:
-        tags.add(TALB(encoding=3, text=[meta.title]))  # Album = Title for audiobooks
-    if fields_to_update.get("album_artist") and meta.authors:
-        tags.add(TPE2(encoding=3, text=meta.authors))  # Album Artist = Author
-    if fields_to_update.get("year") and meta.published_date:
-        tags.add(TDRC(encoding=3, text=[meta.published_date]))
-    if fields_to_update.get("publisher") and meta.publisher:
-        tags.add(TPUB(encoding=3, text=[meta.publisher]))
-    if meta.language:
-        tags.add(TLAN(encoding=3, text=[meta.language]))
-    # Description - tri-state
+    # Helper for Text Tags
+    def update_text(key, val, frame_cls, action_key):
+        action = fields_to_update.get(action_key, 'skip')
+        if action == 'skip': return
+        
+        has_val = False
+        # Check existence (simplified)
+        for k in tags.keys():
+            if k.startswith(key): has_val = True; break
+            
+        if action == 'write' or (action == 'fill' and not has_val):
+             tags.add(frame_cls(encoding=3, text=val))
+
+    if meta.title: update_text("TIT2", [meta.title], TIT2, "title")
+    if meta.authors: update_text("TPE1", meta.authors, TPE1, "author")
+    if meta.title: update_text("TALB", [meta.title], TALB, "album")
+    if meta.authors: update_text("TPE2", meta.authors, TPE2, "album_artist")
+    if meta.published_date: update_text("TDRC", [meta.published_date], TDRC, "year")
+    if meta.publisher: update_text("TPUB", [meta.publisher], TPUB, "publisher")
+    if meta.language: tags.add(TLAN(encoding=3, text=[meta.language])) # Language always set if present? (No UI toggle usually)
+
+    # Description (Custom Logic)
     desc_action = fields_to_update.get("description", 'skip')
-    if desc_action == 'write' and meta.description:
-        tags.add(COMM(encoding=3, lang="eng", desc="Description", text=[meta.description]))
-    elif desc_action == 'delete':
+    has_desc = "COMM" in tags or any(k.startswith("COMM") for k in tags.keys())
+    if desc_action == 'write' or (desc_action == 'fill' and not has_desc):
+        if meta.description:
+            tags.add(COMM(encoding=3, lang="eng", desc="Description", text=[meta.description]))
+    elif desc_action == 'delete': # Legacy or explicit delete
         tags.delall("COMM")
-    # Grouping - tri-state
-    grp_action = fields_to_update.get("grouping", 'skip')
-    if grp_action == 'write':
-        if meta.grouping:
-            tags.add(TIT1(encoding=3, text=meta.grouping))
-    elif grp_action == 'delete':
-        tags.delall("TIT1")
-    # Compilation - tri-state
+
+    # Compilation (Custom Logic: write_true, write_false, smart_false)
     comp_action = fields_to_update.get("compilation", 'skip')
-    if comp_action == 'write':
+    has_comp = "TCMP" in tags
+    if comp_action == 'write_true':
         tags.add(TCMP(encoding=3, text=["1"]))
-    elif comp_action == 'delete':
-        tags.delall("TCMP")
-    
+    elif comp_action == 'write_false':
+        tags.delall("TCMP") # Removing it acts as False usually, or set 0? iTunes prefers 1 or nothing.
+        # tags.add(TCMP(encoding=3, text=["0"])) # Optional
+    elif comp_action == 'smart_false':
+        if has_comp: tags.delall("TCMP")
+
     # Genre Update
-    if fields_to_update.get("genre") and meta.genres:
+    genre_action = fields_to_update.get("genre", 'skip')
+    has_genre = "TCON" in tags
+    if (genre_action == 'write' or (genre_action == 'fill' and not has_genre)) and meta.genres:
         genre_str = "; ".join(meta.genres)
         tags.add(TCON(encoding=3, text=[genre_str]))
 
@@ -684,40 +692,46 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     
     tags = MP4(path)
     
-    if fields_to_update.get("title") and meta.title:
-        tags["\xa9nam"] = [meta.title]
-    if fields_to_update.get("author") and meta.authors:
-        tags["\xa9ART"] = meta.authors  # Artist
-    if fields_to_update.get("album") and meta.title:
-        tags["\xa9alb"] = [meta.title]  # Album = Title for audiobooks
-    if fields_to_update.get("album_artist") and meta.authors:
-        tags["aART"] = meta.authors  # Album Artist = Author
-    if fields_to_update.get("year") and meta.published_date:
-        tags["\xa9day"] = [meta.published_date]
-    if fields_to_update.get("publisher") and meta.publisher:
-        tags["\xa9pub"] = [meta.publisher]
-    # Description - tri-state
+    def update_tag(key, val, action_key):
+        action = fields_to_update.get(action_key, 'skip')
+        if action == 'skip': return
+        if action == 'write' or (action == 'fill' and not tags.get(key)):
+            tags[key] = val
+
+    if meta.title: update_tag("\xa9nam", [meta.title], "title")
+    if meta.authors: update_tag("\xa9ART", meta.authors, "author")
+    if meta.title: update_tag("\xa9alb", [meta.title], "album")
+    if meta.authors: update_tag("aART", meta.authors, "album_artist")
+    if meta.published_date: update_tag("\xa9day", [meta.published_date], "year")
+    if meta.publisher: update_tag("\xa9pub", [meta.publisher], "publisher")
+
+    # Description
     desc_action = fields_to_update.get("description", 'skip')
-    if desc_action == 'write' and meta.description:
+    if (desc_action == 'write' or (desc_action == 'fill' and not tags.get("desc"))) and meta.description:
         tags["desc"] = [meta.description]
-    elif desc_action == 'delete' and "desc" in tags:
-        del tags["desc"]
-    # Grouping - tri-state
+    elif desc_action == 'delete':
+        if "desc" in tags: del tags["desc"]
+
+    # Grouping (Legacy)
     grp_action = fields_to_update.get("grouping", 'skip')
-    if grp_action == 'write':
-        if meta.grouping:
-            tags["\xa9grp"] = meta.grouping
-    elif grp_action == 'delete' and "\xa9grp" in tags:
-        del tags["\xa9grp"]
-    # Compilation - tri-state
+    if grp_action == 'write' or (grp_action == 'fill' and not tags.get("\xa9grp")):
+         if meta.grouping: tags["\xa9grp"] = meta.grouping
+    elif grp_action == 'delete':
+         if "\xa9grp" in tags: del tags["\xa9grp"]
+
+    # Compilation
     comp_action = fields_to_update.get("compilation", 'skip')
-    if comp_action == 'write':
+    has_comp = tags.get("cpil", [False])[0]
+    if comp_action == 'write_true':
         tags["cpil"] = [True]
-    elif comp_action == 'delete' and "cpil" in tags:
-        del tags["cpil"]
+    elif comp_action == 'write_false':
+         tags["cpil"] = [False]
+    elif comp_action == 'smart_false':
+        if has_comp: tags["cpil"] = [False]
     
     # Genre
-    if fields_to_update.get("genre") and meta.genres:
+    genre_action = fields_to_update.get("genre", 'skip')
+    if (genre_action == 'write' or (genre_action == 'fill' and not tags.get("\xa9gen"))) and meta.genres:
         tags["\xa9gen"] = ["; ".join(meta.genres)]
     
     # Clear Track/Disc Numbers (single file audiobooks shouldn't have these)
@@ -741,49 +755,53 @@ def update_opus_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields
     
     tags = OggOpus(path)
     
-    if fields_to_update.get("title") and meta.title:
-        tags["title"] = meta.title
-    if fields_to_update.get("author") and meta.authors:
-        tags["artist"] = "; ".join(meta.authors)
-    if fields_to_update.get("album") and meta.title:
-        tags["album"] = meta.title
-    if fields_to_update.get("album_artist") and meta.authors:
-        tags["albumartist"] = "; ".join(meta.authors)
-    if fields_to_update.get("year") and meta.published_date:
-        tags["date"] = meta.published_date
-    if fields_to_update.get("publisher") and meta.publisher:
-        tags["organization"] = meta.publisher
-    # Description - tri-state
+    def update_tag(key, val, action_key):
+        action = fields_to_update.get(action_key, 'skip')
+        if action == 'skip': return
+        if action == 'write' or (action == 'fill' and not tags.get(key)):
+            tags[key] = val
+
+    if meta.title: update_tag("title", meta.title, "title")
+    if meta.authors: update_tag("artist", "; ".join(meta.authors), "author")
+    if meta.title: update_tag("album", meta.title, "album")
+    if meta.authors: update_tag("albumartist", "; ".join(meta.authors), "album_artist")
+    if meta.published_date: update_tag("date", meta.published_date, "year")
+    if meta.publisher: update_tag("organization", meta.publisher, "publisher")
+
+    # Description
     desc_action = fields_to_update.get("description", 'skip')
-    if desc_action == 'write' and meta.description:
+    if (desc_action == 'write' or (desc_action == 'fill' and not tags.get("description"))) and meta.description:
         tags["description"] = meta.description
-    elif desc_action == 'delete' and "description" in tags:
-        del tags["description"]
-    # Grouping - tri-state
+    elif desc_action == 'delete':
+        if "description" in tags: del tags["description"]
+        
+    # Grouping (Legacy)
     grp_action = fields_to_update.get("grouping", 'skip')
-    if grp_action == 'write':
-        if meta.grouping:
-            tags["grouping"] = meta.grouping
-    elif grp_action == 'delete' and "grouping" in tags:
-        del tags["grouping"]
-    # Compilation - tri-state
+    if grp_action == 'write' or (grp_action == 'fill' and not tags.get("grouping")):
+        if meta.grouping: tags["grouping"] = meta.grouping
+    elif grp_action == 'delete':
+        if "grouping" in tags: del tags["grouping"]
+        
+    # Compilation
     comp_action = fields_to_update.get("compilation", 'skip')
-    if comp_action == 'write':
+    has_comp = tags.get("compilation", ["0"])[0] == "1" # Assume "1" is true
+    if comp_action == 'write_true':
         tags["compilation"] = "1"
-    elif comp_action == 'delete' and "compilation" in tags:
-        del tags["compilation"]
-    if fields_to_update.get("genre") and meta.genres:
+    elif comp_action == 'write_false':
+        tags["compilation"] = "0"
+    elif comp_action == 'smart_false':
+        if has_comp: tags["compilation"] = "0"
+
+    # Genre
+    genre_action = fields_to_update.get("genre", 'skip')
+    if (genre_action == 'write' or (genre_action == 'fill' and not tags.get("genre"))) and meta.genres:
         tags["genre"] = "; ".join(meta.genres)
     
     # Clear Track/Disc Numbers (single file audiobooks shouldn't have these)
-    if "tracknumber" in tags:
-        del tags["tracknumber"]
-    if "discnumber" in tags:
-        del tags["discnumber"]
-    if "totaltracks" in tags:
-        del tags["totaltracks"]
-    if "totaldiscs" in tags:
-        del tags["totaldiscs"]
+    if "tracknumber" in tags: del tags["tracknumber"]
+    if "discnumber" in tags: del tags["discnumber"]
+    if "totaltracks" in tags: del tags["totaltracks"]
+    if "totaldiscs" in tags: del tags["totaldiscs"]
     
     # Note: Cover art for Opus is complex (requires base64 encoding), skipping for now
     
@@ -1262,16 +1280,16 @@ class TaggerEngine:
             else:
                 self.log("Applying tags to file...")
                 # Log which fields will be updated
-                updating_fields = [k for k, v in fields_to_update.items() if v]
+                updating_fields = [k for k, v in fields_to_update.items() if v and v != 'skip']
                 if updating_fields:
                     self.log(f"Fields to update: {', '.join(updating_fields)}")
                 else:
                     self.log("⚠️  WARNING: No fields selected for update!")
                 
                 # Log metadata values being applied
-                if fields_to_update.get('grouping'):
+                if fields_to_update.get('grouping') and fields_to_update.get('grouping') != 'skip':
                     self.log(f"Grouping values to write: {meta.grouping}")
-                if fields_to_update.get('genre'):
+                if fields_to_update.get('genre') and fields_to_update.get('genre') != 'skip':
                     self.log(f"Genre values to write: {meta.genres}")
                 
                 apply_metadata(path, meta, cover_data, fields_to_update)

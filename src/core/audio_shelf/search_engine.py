@@ -1,9 +1,40 @@
 
 import requests
 import re
+import time
 from typing import List, Optional, Dict, Any
 from bs4 import BeautifulSoup
 
+def retry_on_failure(retries=3, delay=5):
+    """
+    Decorator to retry function call on RequestException.
+    Waits `delay` seconds between retries.
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(retries):
+                try:
+                    return func(*args, **kwargs)
+                except requests.exceptions.RequestException as e:
+                    last_exception = e
+                    print(f"DEBUG: Network error in {func.__name__} (Attempt {attempt+1}/{retries}): {e}")
+                    if attempt < retries - 1:
+                        time.sleep(delay)
+            # If all retries fail, return empty result specific to function signature
+            # or re-raise. For these search functions, returning [] or None is safer.
+            print(f"DEBUG: All retries failed for {func.__name__}. Last Error: {last_exception}")
+            # Map exception handling based on expected return type (List or None)
+            # This implementation assumes the decorated functions handle their own "business" logic
+            # inside the try block, but since we wrap the whole thing, we need to handle the crash.
+            # Actually, to be non-intrusive, let's just make the inner request retriable.
+            # BUT, since we are wrapping the whole function, we need to know what to return on failure.
+            # search_* functions return List[str], scrape_* return Optional[Dict]
+            return [] if "search_" in func.__name__ else None
+        return wrapper
+    return decorator
+
+@retry_on_failure(retries=3, delay=5)
 def search_duckduckgo_audible(query: str, limit: int = 3) -> List[str]:
     """
     Searches DuckDuckGo HTML for 'site:audible.com <query>' and returns a list of Audible product URLs.
@@ -19,35 +50,31 @@ def search_duckduckgo_audible(query: str, limit: int = 3) -> List[str]:
     
     found_urls = []
     
-    try:
-        r = requests.post(url, data=data, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return []
-            
-        soup = BeautifulSoup(r.text, "html.parser")
+    r = requests.post(url, data=data, headers=headers, timeout=10)
+    if r.status_code != 200:
+        return []
         
-        # Parse results
-        # DDG HTML results usually have class 'result__a' for title links
-        for a in soup.select(".result__a"):
-            if len(found_urls) >= limit:
-                break
-                
-            href = a.get("href", "")
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    # Parse results
+    # DDG HTML results usually have class 'result__a' for title links
+    for a in soup.select(".result__a"):
+        if len(found_urls) >= limit:
+            break
             
-            # Filter for actual audible product pages
-            # standard patterns: /pd/..., /dp/...
-            if "audible.com/pd/" in href or "audible.com/dp/" in href:
-                # Sometimes DDG wraps links, but usually html version is direct or close enough
-                # Let's clean it just in case
-                if href.startswith("//duckduckgo.com/l/?"):
-                    # It's a redirect link, try to extract 'uddg' param if possible or just skip
-                    # Parsing query params is safer
-                    pass 
-                
-                found_urls.append(href)
-                
-    except Exception:
-        pass
+        href = a.get("href", "")
+        
+        # Filter for actual audible product pages
+        # standard patterns: /pd/..., /dp/...
+        if "audible.com/pd/" in href or "audible.com/dp/" in href:
+            # Sometimes DDG wraps links, but usually html version is direct or close enough
+            # Let's clean it just in case
+            if href.startswith("//duckduckgo.com/l/?"):
+                # It's a redirect link, try to extract 'uddg' param if possible or just skip
+                # Parsing query params is safer
+                pass 
+            
+            found_urls.append(href)
         
     return found_urls
 
@@ -71,6 +98,7 @@ def extract_asin_from_url(url: str) -> Optional[str]:
 
     return None
 
+@retry_on_failure(retries=3, delay=5)
 def search_goodreads_direct(query: str, limit: int = 3) -> List[str]:
     """
     Searches Goodreads directly via /search?q=...
@@ -91,51 +119,46 @@ def search_goodreads_direct(query: str, limit: int = 3) -> List[str]:
     
     found_urls = []
     
-    try:
-            print(f"DEBUG: Querying Goodreads Direct: {url}")
-            r = requests.get(url, headers=headers, timeout=10)
+    print(f"DEBUG: Querying Goodreads Direct: {url}")
+    r = requests.get(url, headers=headers, timeout=10)
+    
+    if r.status_code != 200:
+            print(f"DEBUG: Goodreads Search Status: {r.status_code}")
+            return []
             
-            if r.status_code != 200:
-                 print(f"DEBUG: Goodreads Search Status: {r.status_code}")
-                 return []
-                 
-            soup = BeautifulSoup(r.text, "html.parser")
-            
-            # Goodreads search results usually have class "bookTitle"
-            # <a class="bookTitle" itemprop="url" href="/book/show/...">
-            
-            count = 0
-            for a in soup.select("a.bookTitle"):
-                if count >= limit: break
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    # Goodreads search results usually have class "bookTitle"
+    # <a class="bookTitle" itemprop="url" href="/book/show/...">
+    
+    count = 0
+    for a in soup.select("a.bookTitle"):
+        if count >= limit: break
+        
+        href = a.get("href", "")
+        title_text = a.get_text().strip().lower()
+        
+        # Filter spam/summaries
+        is_spam = False
+        for exc in exclusions:
+            if exc in title_text and exc not in query_lower:
+                is_spam = True
+                print(f"DEBUG: Skipped spam/summary result: '{title_text}'")
+                break
+        if is_spam: continue
+        
+        if href:
+            # Often relative path
+            if href.startswith("/"):
+                href = f"https://www.goodreads.com{href}"
                 
-                href = a.get("href", "")
-                title_text = a.get_text().strip().lower()
+            # Clean off query params if needed
+            if "?" in href:
+                href = href.split("?")[0]
                 
-                # Filter spam/summaries
-                is_spam = False
-                for exc in exclusions:
-                    if exc in title_text and exc not in query_lower:
-                        is_spam = True
-                        print(f"DEBUG: Skipped spam/summary result: '{title_text}'")
-                        break
-                if is_spam: continue
-                
-                if href:
-                    # Often relative path
-                    if href.startswith("/"):
-                        href = f"https://www.goodreads.com{href}"
-                        
-                    # Clean off query params if needed
-                    if "?" in href:
-                        href = href.split("?")[0]
-                        
-                    print(f"DEBUG: Found GR Book: {href}")
-                    found_urls.append(href)
-                    count += 1
-                
-    except Exception as e:
-        print(f"DEBUG: GR Search Error: {e}")
-        pass
+            print(f"DEBUG: Found GR Book: {href}")
+            found_urls.append(href)
+            count += 1
         
     return found_urls
 
@@ -217,6 +240,7 @@ def scrape_goodreads_rating(session, url: str):
         
     return None
 
+@retry_on_failure(retries=3, delay=5)
 def search_duckduckgo_amazon(query: str, limit: int = 3) -> List[str]:
     """
     Searches DuckDuckGo HTML for 'site:amazon.com <query>' and returns urls.
@@ -233,26 +257,22 @@ def search_duckduckgo_amazon(query: str, limit: int = 3) -> List[str]:
     
     found_urls = []
     
-    try:
-        print(f"DEBUG: Searching DDG for Amazon: {search_term}")
-        r = requests.post(url, data=data, headers=headers, timeout=10)
+    print(f"DEBUG: Searching DDG for Amazon: {search_term}")
+    r = requests.post(url, data=data, headers=headers, timeout=10)
+    
+    soup = BeautifulSoup(r.text, "html.parser")
+    
+    for a in soup.select(".result__a"):
+        if len(found_urls) >= limit: break
         
-        soup = BeautifulSoup(r.text, "html.parser")
-        
-        for a in soup.select(".result__a"):
-            if len(found_urls) >= limit: break
-            
-            href = a.get("href", "")
-            # Look for product pages: /dp/ or /gp/product/
-            if "/dp/" in href or "/gp/product/" in href:
-                # Clean URL
-                if "http" in href:
-                     # Remove query params
-                     if "?" in href: href = href.split("?")[0]
-                     found_urls.append(href)
-                     
-    except Exception as e:
-        print(f"Amazon Search Error: {e}")
+        href = a.get("href", "")
+        # Look for product pages: /dp/ or /gp/product/
+        if "/dp/" in href or "/gp/product/" in href:
+            # Clean URL
+            if "http" in href:
+                    # Remove query params
+                    if "?" in href: href = href.split("?")[0]
+                    found_urls.append(href)
         
     return found_urls
 

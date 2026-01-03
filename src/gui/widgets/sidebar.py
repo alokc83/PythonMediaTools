@@ -1,6 +1,6 @@
 
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QButtonGroup, QApplication
+    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QButtonGroup, QApplication, QScrollArea
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -33,12 +33,49 @@ class SidebarWidget(QWidget):
         title_layout.addWidget(title_label)
         layout.addWidget(title_frame)
 
-        # Navigation Buttons
-        self.nav_layout = QVBoxLayout()
+        # Sticky Dashboard Button (Outside ScrollArea)
+        # We use a container to add some top spacing if needed, but direct add is fine
+        # Add a small spacer/margin container if we want consistency with scroll area
+        sticky_container = QWidget()
+        sticky_layout = QVBoxLayout(sticky_container)
+        sticky_layout.setContentsMargins(0, 10, 0, 0) # Top margin 10px
+        sticky_layout.setSpacing(0)
+        self.add_nav_btn("Dashboard", 0, True, target_layout=sticky_layout)
+        layout.addWidget(sticky_container)
+
+        # Scroll Area for Navigation
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                border: none;
+                background: #2b2b2b;
+                width: 8px;
+                margin: 0px 0px 0px 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #444;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+        
+        # Content Widget for Scroll Area
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet("background-color: #2b2b2b; border: none;")
+        self.nav_layout = QVBoxLayout(scroll_content)
         self.nav_layout.setContentsMargins(0, 10, 0, 10)
         self.nav_layout.setSpacing(2)
+        
+        scroll_area.setWidget(scroll_content)
+        layout.addWidget(scroll_area)
 
-        self.add_nav_btn("Dashboard", 0, True)
+        # self.add_nav_btn("Dashboard", 0, True) # Moved to sticky area
         self.nav_layout.addSpacing(10)
         
         # Section 1: Metadata Tools
@@ -68,7 +105,6 @@ class SidebarWidget(QWidget):
         self.add_nav_btn("Bitrate Mover", 13)
 
         self.nav_layout.addStretch()
-        layout.addLayout(self.nav_layout)
         
         # Bottom area
         bottom_frame = QFrame()
@@ -110,7 +146,7 @@ class SidebarWidget(QWidget):
         bottom_layout.addWidget(exit_btn)
         layout.addWidget(bottom_frame)
 
-    def add_nav_btn(self, text, page_id, checked=False):
+    def add_nav_btn(self, text, page_id, checked=False, target_layout=None):
         btn = QPushButton(text)
         btn.setCheckable(True)
         btn.setChecked(checked)
@@ -139,7 +175,11 @@ class SidebarWidget(QWidget):
         """)
         
         self.btn_group.addButton(btn, page_id)
-        self.nav_layout.addWidget(btn)
+        
+        if target_layout is not None:
+            target_layout.addWidget(btn)
+        else:
+            self.nav_layout.addWidget(btn)
 
     def set_active(self, page_id):
         btn = self.btn_group.button(page_id)

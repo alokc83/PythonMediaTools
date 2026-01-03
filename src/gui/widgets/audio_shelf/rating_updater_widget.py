@@ -62,10 +62,13 @@ class DragDropListWidget(QListWidget):
             event.accept()
 
 class RatingUpdaterWidget(QWidget):
-    def __init__(self):
+    def __init__(self, settings_manager=None, orchestrator=None):
         super().__init__()
+        self.settings_manager = settings_manager
+        self.orchestrator = orchestrator
+        self.task_id = "rating_updater_task"
         self.directories = []
-        self.engine = RatingUpdaterEngine()
+        self.engine = RatingUpdaterEngine(settings_manager=self.settings_manager)
         self.init_ui()
 
     def init_ui(self):
@@ -76,6 +79,13 @@ class RatingUpdaterWidget(QWidget):
         header_lbl = QLabel("Rating & Review Updater")
         header_lbl.setStyleSheet("font-size: 24px; font-weight: bold; color: #00bcd4;")
         layout.addWidget(header_lbl)
+        
+        # Dashboard Visibility Toggle
+        self.dashboard_toggle = QCheckBox("Show in Dashboard")
+        self.dashboard_toggle.setStyleSheet("font-weight: bold; color: #00bcd4; margin-bottom: 10px;")
+        self.dashboard_toggle.setChecked(self.get_dashboard_visibility())
+        self.dashboard_toggle.stateChanged.connect(self.toggle_dashboard_visibility)
+        layout.addWidget(self.dashboard_toggle)
         
         # Progress Bar (Moved to Top)
         self.progress_bar = QProgressBar()
@@ -168,17 +178,37 @@ class RatingUpdaterWidget(QWidget):
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.log_signal.connect(self.append_log)
         self.worker.finished_signal.connect(self.finished)
+        
+        # Orchestrator Start
+        if self.orchestrator:
+             task_name = f"Rating Updater ({len(self.directories)} items)"
+             # view_id 16 is Rating Updater in MainWindow (check main_window.py stack map)
+             self.orchestrator.start_task(self.task_id, task_name, 16)
+        
         self.worker.start()
 
     def stop_update(self):
         if hasattr(self, 'worker') and self.worker.isRunning():
             self.worker.terminate() # Force stop for now as engine doesn't have polite stop check yet
             self.append_log("Process stopped by user.")
+            
+            if self.orchestrator:
+                self.orchestrator.finish_task(self.task_id)
+                
             self.finished()
 
     def update_progress(self, current, total):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
+        
+        if self.orchestrator:
+            # We don't have the "current message" here easily available in this simplified signal
+            # So we pass a generic message or last log if we stored it
+            self.orchestrator.report_progress(self.task_id, current, total, f"Processing item {current}/{total}")
+            
+            # Rate limit/Event Loop Processing
+            from PyQt5.QtWidgets import QApplication
+            QApplication.processEvents()
 
     def append_log(self, text):
         color = "#d4d4d4" # Default grey
@@ -201,3 +231,20 @@ class RatingUpdaterWidget(QWidget):
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.append_log("Done.")
+        
+        if self.orchestrator:
+            self.orchestrator.finish_task(self.task_id)
+
+    def get_dashboard_visibility(self):
+        if self.settings_manager:
+            # rating_updater id is 16
+            val = self.settings_manager.get("dashboard_visible_16")
+            # Default to True if not set
+            if val is None: return True
+            return str(val).lower() == 'true'
+        return True
+
+    def toggle_dashboard_visibility(self):
+        if self.settings_manager:
+            state = self.dashboard_toggle.isChecked()
+            self.settings_manager.set("dashboard_visible_16", str(state).lower())

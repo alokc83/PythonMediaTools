@@ -94,8 +94,9 @@ class FlattenerExecuteThread(QThread):
 
 
 class FlattenerWidget(QWidget):
-    def __init__(self):
+    def __init__(self, settings_manager=None):
         super().__init__()
+        self.settings_manager = settings_manager
         self.flattener = FolderFlattener()
         self.init_ui()
 
@@ -112,6 +113,14 @@ class FlattenerWidget(QWidget):
         desc_lbl.setStyleSheet("font-size: 14px; color: #b0b0b0; margin-bottom: 20px;")
         header_layout.addWidget(title_lbl)
         header_layout.addWidget(desc_lbl)
+        
+        # Dashboard Visibility Toggle
+        self.dashboard_toggle = QCheckBox("Show in Dashboard")
+        self.dashboard_toggle.setStyleSheet("font-weight: bold; color: #00bcd4; margin-bottom: 10px;")
+        self.dashboard_toggle.setChecked(self.get_dashboard_visibility())
+        self.dashboard_toggle.stateChanged.connect(self.toggle_dashboard_visibility)
+        header_layout.addWidget(self.dashboard_toggle)
+        
         layout.addLayout(header_layout)
 
         # Input
@@ -233,3 +242,17 @@ class FlattenerWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.log_text.append("\nExecution Results:\n" + log)
         QMessageBox.information(self, "Finished", "Flatten operation complete.")
+
+    def get_dashboard_visibility(self):
+        if self.settings_manager:
+            # flattener id is 6
+            val = self.settings_manager.get("dashboard_visible_6")
+            # Default to True if not set
+            if val is None: return True
+            return str(val).lower() == 'true'
+        return True
+
+    def toggle_dashboard_visibility(self):
+        if self.settings_manager:
+            state = self.dashboard_toggle.isChecked()
+            self.settings_manager.set("dashboard_visible_6", str(state).lower())

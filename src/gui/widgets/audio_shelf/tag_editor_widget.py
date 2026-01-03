@@ -73,10 +73,12 @@ class TaggerThread(QThread):
 
 
 class TagEditorWidget(QWidget):
-    def __init__(self, settings_manager=None):
+    def __init__(self, settings_manager=None, orchestrator=None):
         super().__init__()
         self.settings_manager = settings_manager
+        self.orchestrator = orchestrator
         self.files = []
+        self.task_id = "tag_editor_task" # Simple fixed ID for now, or uuid
         self.init_ui()
 
     def init_ui(self):
@@ -92,6 +94,14 @@ class TagEditorWidget(QWidget):
         desc_lbl.setStyleSheet("font-size: 14px; color: #b0b0b0; margin-bottom: 20px;")
         header_layout.addWidget(title_lbl)
         header_layout.addWidget(desc_lbl)
+        
+        # Dashboard Visibility Toggle
+        self.dashboard_toggle = QCheckBox("Show in Dashboard")
+        self.dashboard_toggle.setStyleSheet("font-weight: bold; color: #00bcd4;")
+        self.dashboard_toggle.setChecked(self.get_dashboard_visibility())
+        self.dashboard_toggle.stateChanged.connect(self.toggle_dashboard_visibility)
+        header_layout.addWidget(self.dashboard_toggle)
+        
         layout.addLayout(header_layout)
 
         # Input
@@ -129,6 +139,7 @@ class TagEditorWidget(QWidget):
         # Master Select All checkbox
         master_layout = QHBoxLayout()
         self.select_all_check = QCheckBox("Select All / Deselect All")
+        self.select_all_check.setTristate(True) # Enable 3-state cycling
         self.select_all_check.setChecked(True)
         self.select_all_check.setStyleSheet("font-weight: bold; color: #00bcd4;")
         self.select_all_check.stateChanged.connect(self.toggle_all_fields)
@@ -157,20 +168,24 @@ class TagEditorWidget(QWidget):
         self.cover_check = QCheckBox("Cover Art")
         self.cover_check.setChecked(True)
         self.cover_check.setTristate(True)  # Enable tri-state
-        self.grouping_check = QCheckBox("Grouping")
-        self.grouping_check.setChecked(False)  # Optional field
-        self.grouping_check.setTristate(True)  # Enable tri-state
+        self.cover_check = QCheckBox("Cover Art")
+        self.cover_check.setChecked(True)
+        self.cover_check.setTristate(True)  # Enable tri-state
         self.compilation_check = QCheckBox("Compilation")
         self.compilation_check.setChecked(False)  # Optional field
-        self.compilation_check.setTristate(True)  # Enable tri-state
-        self.rating_check = QCheckBox("Rating/Review") # New Rating Checkbox
-        self.rating_check.setChecked(True)
+        self.compilation_check.setTristate(True)  # Enable tri-state (Checked=True, Unchecked=False, Partial=SmartFalse)
         
+        # Enable Tristate for standard fields (Checked=Overwite, Partial=Fill, Unchecked=Skip)
+        for chk in [self.title_check, self.author_check, self.album_check, self.album_artist_check, 
+                   self.genre_check, self.year_check, self.publisher_check]:
+            chk.setTristate(True)
+        
+        # Store all field checkboxes for easy access
         # Store all field checkboxes for easy access
         self.field_checkboxes = [
             self.title_check, self.author_check, self.album_check, self.album_artist_check,
-            self.genre_check, self.year_check, self.publisher_check, self.grouping_check,
-            self.description_check, self.rating_check, self.cover_check, self.compilation_check
+            self.genre_check, self.year_check, self.publisher_check,
+            self.description_check, self.cover_check, self.compilation_check
         ]
         
         # Five-column layout for better space utilization
@@ -181,7 +196,6 @@ class TagEditorWidget(QWidget):
         col1.setSpacing(14)
         col1.addWidget(self.title_check)
         col1.addWidget(self.author_check)
-        col1.addWidget(self.album_check)
         col1.addStretch()
         
         # Column 2
@@ -189,21 +203,20 @@ class TagEditorWidget(QWidget):
         col2.setSpacing(14)
         col2.addWidget(self.album_artist_check)
         col2.addWidget(self.genre_check)
-        col2.addWidget(self.year_check)
         col2.addStretch()
         
         # Column 3
         col3 = QVBoxLayout()
         col3.setSpacing(14)
         col3.addWidget(self.publisher_check)
-        col3.addWidget(self.grouping_check)
+        col3.addWidget(self.album_check)  # Moved from Col 1
         col3.addStretch()
         
         # Column 4
         col4 = QVBoxLayout()
         col4.setSpacing(14)
         col4.addWidget(self.description_check)
-        col4.addWidget(self.rating_check)
+        col4.addWidget(self.year_check)   # Moved from Col 2
         col4.addStretch()
         
         # Column 5
@@ -221,49 +234,30 @@ class TagEditorWidget(QWidget):
         
         field_layout.addLayout(columns_layout)
         
-        # Provider Selection Section
-        provider_section = QLabel("Metadata Providers:")
-        provider_section.setStyleSheet("font-weight: bold; color: #00bcd4; margin-top: 6px;")
-        field_layout.addWidget(provider_section)
-        
-        provider_layout = QHBoxLayout()
-        provider_layout.setSpacing(20)
-        
-        # Audnexus checkbox (Default on, Primary)
-        self.provider_audnexus_check = QCheckBox("Audnexus (Audible) - Primary")
-        self.provider_audnexus_check.setChecked(True)
-        self.provider_audnexus_check.setToolTip("Primary audiobook metadata source from Audible")
-        
-        # Google Books checkbox (Default off, Enrichment)
-        self.provider_google_check = QCheckBox("Google Books - Enrichment")
-        self.provider_google_check.setChecked(False)
-        self.provider_google_check.setToolTip("Enrich metadata with additional genres from Google Books")
-        
-        provider_layout.addWidget(self.provider_audnexus_check)
-        provider_layout.addWidget(self.provider_google_check)
-        provider_layout.addStretch()
-        
-        field_layout.addLayout(provider_layout)
-        
-        # Fixed double addLayout bug
-        # field_layout.addLayout(provider_layout)
-        
         field_group.setLayout(field_layout)
         field_group.setMaximumHeight(260)  # Adjusted for 2-column layout
         layout.addWidget(field_group)
 
+        # Options Layout (Horizontal)
+        options_layout = QHBoxLayout()
+        
         # Force Cover Art Option
-        self.force_cover_check = QCheckBox("Force Replace Cover Art (even if exists)")
+        self.force_cover_check = QCheckBox("Force Replace Cover Art")
         self.force_cover_check.setChecked(False)
+        self.force_cover_check.setToolTip("If checked, cover art will be downloaded and replaced even if the file already has one.")
         self.force_cover_check.setStyleSheet("font-style: italic; color: #ff5722;")
-        layout.addWidget(self.force_cover_check)
+        options_layout.addWidget(self.force_cover_check)
 
         # Dry Run Option
-        self.dry_run_check = QCheckBox("Dry Run (Preview changes without writing)")
+        self.dry_run_check = QCheckBox("Dry Run (Preview only)")
         self.dry_run_check.setChecked(True)
+        self.dry_run_check.setToolTip("Preview changes in the log without modifying files.")
         self.dry_run_check.setStyleSheet("font-weight: bold; color: #ff9800;")
         self.dry_run_check.stateChanged.connect(self.update_button_text)
-        layout.addWidget(self.dry_run_check)
+        options_layout.addWidget(self.dry_run_check)
+        
+        options_layout.addStretch()
+        layout.addLayout(options_layout)
 
         # Logs
         log_group = QGroupBox("Process Log")
@@ -352,10 +346,10 @@ class TagEditorWidget(QWidget):
             self.run_btn.setEnabled(True)
     
     def toggle_all_fields(self):
-        """Toggle all field checkboxes based on Select All checkbox state"""
-        is_checked = self.select_all_check.isChecked()
+        """Toggle all field checkboxes based on Select All checkbox state (3-state)"""
+        current_state = self.select_all_check.checkState()
         for checkbox in self.field_checkboxes:
-            checkbox.setChecked(is_checked)
+            checkbox.setCheckState(current_state)
     
     def update_button_text(self):
         """Update button text based on dry run checkbox state"""
@@ -368,43 +362,49 @@ class TagEditorWidget(QWidget):
         if not self.files: return
         
         # Helper function to map checkbox tri-state to action
-        def get_action(checkbox):
+        def get_action(checkbox, is_compilation=False):
             state = checkbox.checkState()
-            if state == Qt.Checked:
-                return 'write'
-            elif state == Qt.PartiallyChecked:
-                return 'delete'
-            else:  # Qt.Unchecked
-                return 'skip'
+            if is_compilation:
+                # Compilation: Checked=True(1), Unchecked=False(0), Partial=SmartFalse
+                if state == Qt.Checked: return 'write_true'
+                elif state == Qt.Unchecked: return 'write_false'
+                else: return 'smart_false' 
+            else:
+                # Standard: Checked=Write, Partial=Fill, Unchecked=Skip
+                if state == Qt.Checked: return 'write'
+                elif state == Qt.PartiallyChecked: return 'fill'
+                else: return 'skip'
         
         # Collect selected fields
         fields_to_update = {
-            "title": self.title_check.isChecked(),
-            "author": self.author_check.isChecked(),
-            "album": self.album_check.isChecked(),
-            "album_artist": self.album_artist_check.isChecked(),
-            "genre": self.genre_check.isChecked(),
-            "year": self.year_check.isChecked(),
-            "publisher": self.publisher_check.isChecked(),
+            "title": get_action(self.title_check),
+            "author": get_action(self.author_check),
+            "album": get_action(self.album_check),
+            "album_artist": get_action(self.album_artist_check),
+            "genre": get_action(self.genre_check),
+            "year": get_action(self.year_check),
+            "publisher": get_action(self.publisher_check),
             "description": get_action(self.description_check),
             "cover": get_action(self.cover_check),
-            "grouping": get_action(self.grouping_check),
-            "compilation": get_action(self.compilation_check),
-            "rating": self.rating_check.isChecked()
+            "compilation": get_action(self.compilation_check, is_compilation=True)
         }
         
         dry_run = self.dry_run_check.isChecked()
         force_cover = self.force_cover_check.isChecked()
         
-        # Collect selected providers
+        # Collect selected providers from Settings
         providers = []
-        if self.provider_audnexus_check.isChecked():
-            providers.append('audnexus')
-        if self.provider_google_check.isChecked():
-            providers.append('google')
-        
+        if self.settings_manager:
+            if self.settings_manager.get('metadata_use_audnexus', True):
+                providers.append('audnexus')
+            if self.settings_manager.get('metadata_use_google', True):
+                providers.append('google')
+        else:
+            # Fallback default
+            providers = ['audnexus']
+
         if not providers:
-            QMessageBox.warning(self, "No Providers Selected", "Please select at least one metadata provider!")
+            QMessageBox.warning(self, "No Providers Selected", "Please enable at least one metadata provider in Settings!")
             return
         
         # Collect Google Books API key (from global settings)
@@ -420,6 +420,12 @@ class TagEditorWidget(QWidget):
         if dry_run:
             self.log_area.append('<span style="color: #ff9800; font-weight: bold;">🔍 DRY RUN MODE - No files will be modified</span>')
             self.log_area.append("-" * 50)
+
+        # Notify Orchestrator of start
+        if self.orchestrator:
+            task_name = f"Mass Tagger ({len(self.files)} files)"
+            # view_id 14 is Tag Editor in MainWindow
+            self.orchestrator.start_task(self.task_id, task_name, 14) 
         
         self.thread = TaggerThread(self.files, fields_to_update, dry_run, force_cover, providers, google_api_key)
         self.thread.progress_signal.connect(self.update_progress)
@@ -432,10 +438,24 @@ class TagEditorWidget(QWidget):
             self.thread.stop()
             self.log_area.append('<span style="color: #ff4444; font-weight: bold;">Stopping...</span>')
             self.stop_btn.setEnabled(False)
+            
+            # Notify Orchestrator of finish (early stop)
+            if self.orchestrator:
+                self.orchestrator.finish_task(self.task_id)
 
     def update_progress(self, current, total, msg):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
+        
+        # Rate limit orchestrator updates to prevent UI freezing
+        # Only update every 1% or every 5 items, whichever is smaller, or if just starting/finishing
+        should_update = (current == 1) or (current == total) or (current % 5 == 0)
+        
+        if self.orchestrator and should_update:
+            self.orchestrator.report_progress(self.task_id, current, total, msg)
+            # Force event loop to process pending events (e.g. repaints) in the main thread
+            from PyQt5.QtWidgets import QApplication
+            QApplication.processEvents()
 
     def log_msg(self, msg):
         msg_str = str(msg)
@@ -475,4 +495,22 @@ class TagEditorWidget(QWidget):
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.progress_bar.setVisible(False)
+        
+        if self.orchestrator:
+             self.orchestrator.finish_task(self.task_id)
+             
         QMessageBox.information(self, "Completed", "Tagging Completed!")
+
+    def get_dashboard_visibility(self):
+        if self.settings_manager:
+            # tag_editor id is 14
+            val = self.settings_manager.get("dashboard_visible_14")
+            # Default to True if not set
+            if val is None: return True
+            return str(val).lower() == 'true'
+        return True
+
+    def toggle_dashboard_visibility(self):
+        if self.settings_manager:
+            state = self.dashboard_toggle.isChecked()
+            self.settings_manager.set("dashboard_visible_14", str(state).lower())
