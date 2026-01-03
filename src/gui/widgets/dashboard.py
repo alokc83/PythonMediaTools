@@ -33,7 +33,9 @@ class DashboardWidget(QWidget):
             {"title": "Blinkist Pruner", "desc": "Format priority pruning for audiobook libraries.", "id": 8, "key": "pruner"},
             {"title": "Tag Editor", "desc": "Auto-tag MP3/M4B files using Audnexus/Google Books.", "id": 14, "key": "tag_editor"},
             # Row 2
+            {"title": "ATF Cleaner", "desc": "Recursively delete .atf metadata cache files.", "id": 15, "key": "atf_cleaner"},
             {"title": "Rating Updater", "desc": "Update ratings from user metadata to file tags.", "id": 16, "key": "rating_updater"},
+            {"title": "Description Updater", "desc": "Scrape and update book descriptions to Comment tag.", "id": 17, "key": "desc_updater"},
             {"title": "Settings", "desc": "Configure global application defaults.", "id": 99, "key": "settings"}
         ]
         

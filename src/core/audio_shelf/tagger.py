@@ -70,7 +70,8 @@ def uniq_ci(values: List[str]) -> List[str]:
             out.append(vv)
     return out
 
-def shorten_description(s: str, limit: int = 900) -> str:
+def shorten_description(s: str, limit: int = 50000) -> str:
+    """Normalize whitespace in description. Limit increased to 50K to preserve full content (tag limit is 256MB)."""
     s = re.sub(r"\s+", " ", (s or "")).strip()
     if len(s) <= limit: return s
     return s[:limit].rstrip() + "..."
@@ -276,11 +277,53 @@ def audible_find_asin(session: requests.Session, q: BookQuery, region: str="us")
             return None, None
         
         soup = BeautifulSoup(r.text, "html.parser")
-        a = soup.select_one("a[href*='/pd/']")
-        if not a:
-            return None, None
+        
+        # Robust Scraper: Target Organic Search Results only (ignore Sponsored/Carousel)
+        # Audible structure: div.adbl-impression-container > li.productListItem
+        # OR look for h3 with class 'bc-heading' inside a product list item
+        
+        # Strategy: find all product list items, skip audiobooks that are "Sponsored" (hard to detect in HTML sometimes, but structure helps)
+        # Usually organic results are in a specific list container.
+        
+        # Try finding the main product list
+        items = soup.select("li.productListItem")
+        if not items:
+            # Fallback to old behavior if list structure changes, but be careful
+            # Or try searching rows
+            items = soup.select("tr.productListItem")
+            
+        target_link = None
+        
+        for item in items:
+            # Verify it's an Audiobook match
+            # Check for title link
+            link = item.select_one("a[href*='/pd/']")
+            if link:
+                # OPTIONAL: Check if "Sponsored" label exists in item text? 
+                # Audible usually puts "Sponsored" in small text.
+                if "Sponsored" in item.get_text():
+                    continue 
 
-        href = a.get("href", "")
+                target_link = link
+                break
+        
+        # Fallback if specific structure failed (maybe mobile view?)
+        if not target_link:
+             # Fallback: Find first /pd/ link that is NOT in a carousel
+             # Carousels often use 'bc-carousel' class
+             links = soup.select("a[href*='/pd/']")
+             for l in links:
+                 # Check parents for carousel class
+                 parents = [p.get('class', []) for p in l.parents]
+                 is_carousel = any(any('carousel' in str(c).lower() for c in cls_list) for cls_list in parents)
+                 if not is_carousel:
+                     target_link = l
+                     break
+                     
+        if not target_link:
+             return None, None
+
+        href = target_link.get("href", "")
         book_url = href if href.startswith("http") else base + href
 
         m = re.search(r"/pd/[^/]+/([A-Z0-9]{10})", book_url)
@@ -301,8 +344,10 @@ def provider_audnexus_by_asin(session: requests.Session, asin: str) -> Optional[
             
         data = r.json() or {}
         
+        
         title = norm_space(str(data.get("title") or ""))
-        desc = shorten_description(str(data.get("description") or "") or str(data.get("summary") or ""))
+        # Prefer summary (full synopsis ~2K chars) over description (marketing blurb ~130 chars)
+        desc = shorten_description(str(data.get("summary") or "") or str(data.get("description") or ""))
         
         authors = [a.get("name") for a in (data.get("authors") or []) if isinstance(a, dict) and a.get("name")]
         narrators = [n.get("name") for n in (data.get("narrators") or []) if isinstance(n, dict) and n.get("name")]
@@ -642,10 +687,17 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     # Description (Custom Logic)
     desc_action = fields_to_update.get("description", 'skip')
     has_desc = "COMM" in tags or any(k.startswith("COMM") for k in tags.keys())
-    if desc_action == 'write' or (desc_action == 'fill' and not has_desc):
+    
+    if desc_action == 'write':
+        # Force write: Clear ALL existing COMM frames first to avoid duplicates/conflicts
+        tags.delall("COMM")
         if meta.description:
-            tags.add(COMM(encoding=3, lang="eng", desc="Description", text=[meta.description]))
-    elif desc_action == 'delete': # Legacy or explicit delete
+            # Empty desc makes it the default comment that all players show
+            tags.add(COMM(encoding=3, lang="eng", desc="", text=[meta.description]))
+    elif desc_action == 'fill' and not has_desc:
+        if meta.description:
+            tags.add(COMM(encoding=3, lang="eng", desc="", text=[meta.description]))
+    elif desc_action == 'delete':
         tags.delall("COMM")
 
     # Compilation (Custom Logic: write_true, write_false, smart_false)
@@ -708,9 +760,11 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     # Description
     desc_action = fields_to_update.get("description", 'skip')
     if (desc_action == 'write' or (desc_action == 'fill' and not tags.get("desc"))) and meta.description:
-        tags["desc"] = [meta.description]
+        tags["desc"] = [meta.description] # Standard Description
+        tags["\xa9cmt"] = [meta.description] # Comment (for wider compatibility)
     elif desc_action == 'delete':
         if "desc" in tags: del tags["desc"]
+        if "\xa9cmt" in tags: del tags["\xa9cmt"]
 
     # Grouping (Legacy)
     grp_action = fields_to_update.get("grouping", 'skip')
@@ -721,7 +775,14 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
 
     # Compilation
     comp_action = fields_to_update.get("compilation", 'skip')
-    has_comp = tags.get("cpil", [False])[0]
+    # Safe handling of cpil which can be list or scalar depending on parser
+    comp_val = tags.get("cpil", [False])
+    has_comp = False
+    if isinstance(comp_val, list):
+        if comp_val:
+            has_comp = bool(comp_val[0])
+    else:
+        has_comp = bool(comp_val)
     if comp_action == 'write_true':
         tags["cpil"] = [True]
     elif comp_action == 'write_false':
@@ -955,10 +1016,24 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
         final_grouping.extend(clean_parts)
     new_grouping = uniq_ci(final_grouping)
     
-    # Description: Prefer Longest
-    desc = primary.description
-    if secondary.description and len(secondary.description) > len(desc or ""):
+    # Description: Prefer Longest with Quality Checks
+    # With 256MB tag limit, we want the fullest description available
+    desc = primary.description or ""
+    primary_len = len(desc)
+    secondary_len = len(secondary.description or "")
+    
+    # Always pick the longest description available
+    if secondary_len > primary_len and secondary.description:
         desc = secondary.description
+        print(f"[Merge] Using {secondary.source} description ({secondary_len} chars) over {primary.source} ({primary_len} chars)")
+    elif primary_len > 0:
+        print(f"[Merge] Keeping {primary.source} description ({primary_len} chars)")
+    
+    # Warn if final result is too short (but still use it)
+    MIN_VALID_DESC = 50
+    if len(desc) < MIN_VALID_DESC and len(desc) > 0:
+        print(f"[Merge] WARNING: Final description is short ({len(desc)} chars, recommend {MIN_VALID_DESC}+)")
+
         
     # Date/Publisher: Prefer Primary, fallback to secondary
     pub = primary.publisher or secondary.publisher
@@ -1132,8 +1207,17 @@ class TaggerEngine:
                 self.log(f"Found ASIN via Internal Search: {asin}")
                 audnexus_meta = provider_audnexus_by_asin(self.session, asin)
                 if audnexus_meta:
-                    meta_results.append(audnexus_meta)
-                    self.log(f"Audnexus: Found '{audnexus_meta.title}'")
+                    # --- EARLY VALIDATION ---
+                    # Check if this result is even close to what we asked for.
+                    # Prevents "Frankenstein Merges" where we merge a bad result with a good one.
+                    early_conf = calculate_confidence(q, audnexus_meta)
+                    if early_conf < 0.4:
+                        self.log(f"⚠️ DISCARDING Audnexus Result: Low Similarity ({early_conf:.2f})")
+                        self.log(f"   Query: {q.title}")
+                        self.log(f"   Found: {audnexus_meta.title}")
+                    else:
+                        meta_results.append(audnexus_meta)
+                        self.log(f"Audnexus: Found '{audnexus_meta.title}' (Conf: {early_conf:.2f})")
             
             # Fallback: DuckDuckGo external search if internal fails
             if not meta_results:
@@ -1149,26 +1233,40 @@ class TaggerEngine:
                         self.log(f"Extracted ASIN: {found_asin}. Querying Audnexus...")
                         audnexus_meta = provider_audnexus_by_asin(self.session, found_asin)
                         if audnexus_meta:
-                            self.log("Audnexus Success!")
-                            meta_results.append(audnexus_meta)
-                            break
+                            e_conf = calculate_confidence(q, audnexus_meta)
+                            if e_conf < 0.4:
+                                self.log(f"⚠️ DISCARDING Fallback Audnexus: Low Similarity ({e_conf:.2f})")
+                            else:
+                                self.log(f"Audnexus Success! (Conf: {e_conf:.2f})")
+                                meta_results.append(audnexus_meta)
+                                break
                     
                     # If no ASIN or Audnexus failed, Try Direct Scrape
                     if not meta_results:
                         self.log("Audnexus failed. Fallback: Direct HTML Scraping...")
                         scrape_meta = provider_audible_scrape(self.session, url)
                         if scrape_meta:
-                            self.log("Direct Scraping Success!")
-                            meta_results.append(scrape_meta)
-                            break
+                            e_conf = calculate_confidence(q, scrape_meta)
+                            if e_conf < 0.4:
+                                self.log(f"⚠️ DISCARDING Direct Scrape: Low Similarity ({e_conf:.2f})")
+                            else:
+                                self.log(f"Direct Scraping Success! (Conf: {e_conf:.2f})")
+                                meta_results.append(scrape_meta)
+                                break
         
         # Provider 2: Google Books (Enrichment)
         if 'google' in providers:
             self.log("Step 2: Querying Google Books for enrichment...")
             google_meta = google_books_search(self.session, q, api_key=self.google_books_api_key)
             if google_meta:
-                meta_results.append(google_meta)
-                self.log(f"Google Books: Found '{google_meta.title}'")
+                 # Early Validation
+                early_conf = calculate_confidence(q, google_meta)
+                if early_conf < 0.4:
+                    self.log(f"⚠️ DISCARDING Google Result: Low Similarity ({early_conf:.2f})")
+                    self.log(f"   Found: {google_meta.title}")
+                else:
+                    meta_results.append(google_meta)
+                    self.log(f"Google Books: Found '{google_meta.title}' (Conf: {early_conf:.2f})")
             else:
                 self.log("Google Books: No results")
         
@@ -1190,6 +1288,12 @@ class TaggerEngine:
             for secondary in meta_results[1:]:
                 meta = merge_metadata(meta, secondary)
             self.log(f"Merged Result: '{meta.title}' from {meta.source}")
+        
+        # Log description info
+        desc_len = len(meta.description or "")
+        if desc_len > 0:
+            preview = (meta.description[:100] + "...") if desc_len > 100 else meta.description
+            self.log(f"Description: {desc_len} chars - '{preview}'")
             
         # --- ENHANCE DESCRIPTION WITH RATING ---
         # "⭐️ Rating: 4.8/5 (12,450 reviews)"
@@ -1209,11 +1313,16 @@ class TaggerEngine:
                 
                 meta.description = f"{rating_header}\n\n{meta.description}"
                 self.log(f"Added Rating to Description: {rating_header}")
+                
+                # Log final description length
+                final_len = len(meta.description)
+                self.log(f"Final Description: {final_len} chars (rating + original content)")
             except Exception as e:
                 self.log(f"Failed to format rating: {e}")
               
         # 4. Confidence Check
         self.log("Step 3: Calculating Confidence Score...")
+        
         confidence = calculate_confidence(q, meta)
         
         source_detail = meta.source

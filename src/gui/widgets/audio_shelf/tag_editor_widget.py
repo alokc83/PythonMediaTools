@@ -140,7 +140,7 @@ class TagEditorWidget(QWidget):
         master_layout = QHBoxLayout()
         self.select_all_check = QCheckBox("Select All / Deselect All")
         self.select_all_check.setTristate(True) # Enable 3-state cycling
-        self.select_all_check.setChecked(True)
+        self.select_all_check.setCheckState(Qt.PartiallyChecked) # Default to Partical (Fill Mode)
         self.select_all_check.setStyleSheet("font-weight: bold; color: #00bcd4;")
         self.select_all_check.stateChanged.connect(self.toggle_all_fields)
         master_layout.addWidget(self.select_all_check)
@@ -149,36 +149,47 @@ class TagEditorWidget(QWidget):
         
         # Create checkboxes (more compact)
         self.title_check = QCheckBox("Title")
-        self.title_check.setChecked(True)
+        self.title_check.setTristate(True)
+        self.title_check.setCheckState(Qt.PartiallyChecked)
+        
         self.author_check = QCheckBox("Artist/Author")
-        self.author_check.setChecked(True)
+        self.author_check.setTristate(True)
+        self.author_check.setCheckState(Qt.PartiallyChecked)
+        
         self.album_check = QCheckBox("Album")
-        self.album_check.setChecked(True)
+        self.album_check.setTristate(True)
+        self.album_check.setCheckState(Qt.PartiallyChecked)
+        
         self.album_artist_check = QCheckBox("Album Artist")
-        self.album_artist_check.setChecked(True)
+        self.album_artist_check.setTristate(True)
+        self.album_artist_check.setCheckState(Qt.PartiallyChecked)
+        
         self.genre_check = QCheckBox("Genre")
-        self.genre_check.setChecked(True)
+        self.genre_check.setTristate(True)
+        self.genre_check.setCheckState(Qt.PartiallyChecked)
+        
         self.year_check = QCheckBox("Year")
-        self.year_check.setChecked(True)
+        self.year_check.setTristate(True)
+        self.year_check.setCheckState(Qt.PartiallyChecked)
+        
         self.publisher_check = QCheckBox("Publisher")
-        self.publisher_check.setChecked(True)
+        self.publisher_check.setTristate(True)
+        self.publisher_check.setCheckState(Qt.PartiallyChecked)
+        
         self.description_check = QCheckBox("Description/Comments")
-        self.description_check.setChecked(True)
         self.description_check.setTristate(True)  # Enable tri-state
+        self.description_check.setCheckState(Qt.PartiallyChecked)
+        
         self.cover_check = QCheckBox("Cover Art")
-        self.cover_check.setChecked(True)
         self.cover_check.setTristate(True)  # Enable tri-state
-        self.cover_check = QCheckBox("Cover Art")
-        self.cover_check.setChecked(True)
-        self.cover_check.setTristate(True)  # Enable tri-state
+        self.cover_check.setCheckState(Qt.PartiallyChecked)
+
         self.compilation_check = QCheckBox("Compilation")
-        self.compilation_check.setChecked(False)  # Optional field
         self.compilation_check.setTristate(True)  # Enable tri-state (Checked=True, Unchecked=False, Partial=SmartFalse)
+        self.compilation_check.setCheckState(Qt.Unchecked)  # Default: False/Skip (Safer than partial for logic flag)
         
         # Enable Tristate for standard fields (Checked=Overwite, Partial=Fill, Unchecked=Skip)
-        for chk in [self.title_check, self.author_check, self.album_check, self.album_artist_check, 
-                   self.genre_check, self.year_check, self.publisher_check]:
-            chk.setTristate(True)
+        # Already set above during init
         
         # Store all field checkboxes for easy access
         # Store all field checkboxes for easy access

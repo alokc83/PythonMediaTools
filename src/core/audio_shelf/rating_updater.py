@@ -79,10 +79,8 @@ class RatingUpdaterEngine:
         try:
             self.log(f"\n--- Processing Book {idx}/{total}: {os.path.basename(directory)} ---")
             
-            # Smart Skip: Check if already rated
-            if self._is_already_rated(directory):
-                 self.log(f"Skipping {os.path.basename(directory)}: Already contains 'X+ Rated Books' tag.")
-                 return
+            # Smart Skip removed to ensure ratings are always updated/corrected.
+            # if self._is_already_rated(directory): ...
 
             # Get/Update ATF Metadata (Always fetches fresh as per rule)
             meta = self._get_or_update_atf(directory)
@@ -405,8 +403,8 @@ class RatingUpdaterEngine:
         # - Books with few votes get pulled toward baseline
         # - Books with many votes stay close to actual rating
         
-        BASELINE_RATING = 4.0  # Assume median "good" book is 4.0
-        MIN_VOTES_REQUIRED = 250  # Damping factor (tune based on your collection)
+        BASELINE_RATING = 2.0  # Assume unproven book is Neutral/Low (2.0) to force proof of quality
+        MIN_VOTES_REQUIRED = 500  # Damping factor: Increased to 500 to require more "proof" for high ratings
         
         bayesian_ratings = []
         total_count = 0
@@ -623,7 +621,8 @@ class RatingUpdaterEngine:
             
             new_comment = self._prepend_rating(old_comment, new_header)
             
-            # Save to Comment tag
+            # Save to Comment tag - Clear all existing COMM frames first to avoid duplicates
+            audio.delall("COMM")
             audio.add(COMM(encoding=3, lang='eng', desc='', text=[new_comment]))
             
             # Grouping (TIT1)

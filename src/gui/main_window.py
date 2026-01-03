@@ -26,7 +26,10 @@ from src.gui.widgets.audio_shelf.organizer_widget import OrganizerWidget
 from src.gui.widgets.audio_shelf.pruner_widget import PrunerWidget
 from src.gui.widgets.audio_shelf.tag_editor_widget import TagEditorWidget
 from src.gui.widgets.audio_shelf.atf_cleaner_widget import ATFCleanerWidget
+from src.gui.widgets.audio_shelf.tag_editor_widget import TagEditorWidget
+from src.gui.widgets.audio_shelf.atf_cleaner_widget import ATFCleanerWidget
 from src.gui.widgets.audio_shelf.rating_updater_widget import RatingUpdaterWidget
+from src.gui.widgets.audio_shelf.description_updater_widget import DescriptionUpdaterWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -82,7 +85,10 @@ class MainWindow(QMainWindow):
         self.atf_cleaner_widget = ATFCleanerWidget(self.settings_manager)
         # Pass settings_manager first, then orchestrator (or update widget signature)
         # RatingUpdaterWidget(settings, orchestrator)
+        # Pass settings_manager first, then orchestrator (or update widget signature)
+        # RatingUpdaterWidget(settings, orchestrator)
         self.rating_updater_widget = RatingUpdaterWidget(self.settings_manager, self.orchestrator)
+        self.description_updater_widget = DescriptionUpdaterWidget(self.settings_manager, self.orchestrator)
         
         # Stack Order Mapping
         # 0: Dashboard
@@ -123,7 +129,9 @@ class MainWindow(QMainWindow):
         
         add_page(self.tag_editor_widget, 14)
         add_page(self.atf_cleaner_widget, 15)
+        add_page(self.atf_cleaner_widget, 15)
         add_page(self.rating_updater_widget, 16)
+        add_page(self.description_updater_widget, 17)
         
         # Set default
         self.handle_navigation(0)

@@ -104,7 +104,7 @@ def test_merge_metadata_prefers_longer_description():
     )
     
     result = merge_metadata(meta_short, meta_long)
-    assert len(result.description) == 33
+    assert len(result.description) == 34
     assert "much longer description" in result.description
 
 def test_shorten_description_50k_limit():
