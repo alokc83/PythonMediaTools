@@ -500,7 +500,37 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             img = soup.select_one("img.bc-image-inset-border")
         if img:
             cover_url = img.get("src", "")
-            
+
+        
+        # 8. Rating & Rating Count - Try JSON first, then HTML fallback
+        rating = ""
+        rating_count = ""
+        
+        # Try JSON
+        if json_script:
+            try:
+                rating = str(data.get("aggregateRating", {}).get("ratingValue") or "")
+                rating_count = str(data.get("aggregateRating", {}).get("reviewCount") or "")
+            except:
+                pass
+        
+        # Fallback: Scrape from HTML if JSON failed
+        if not rating or not rating_count:
+            # Look for rating spans like: <span class="bc-text bc-size-large">4.7</span>
+            # And count like: <span class="bc-text bc-color-secondary">12,543 ratings</span>
+            rating_spans = soup.select("span.bc-text")
+            for span in rating_spans:
+                text = span.get_text().strip()
+                # Check if it's a rating value (format: X.X out of 5 stars or just X.X)
+                if not rating and re.match(r'^\d\.\d', text):
+                    rating = text.split()[0]  # Get "4.7" from "4.7 out of 5 stars"
+                # Check if it's a rating count (format: "12,543 ratings")
+                if not rating_count and "rating" in text.lower():
+                    # Extract number from "12,543 ratings" or "12543 ratings"
+                    match = re.search(r'([\d,]+)\s*rating', text, re.IGNORECASE)
+                    if match:
+                        rating_count = match.group(1)
+        
         asin = extract_asin_from_url(url) or ""
         
         return BookMeta(
@@ -515,8 +545,8 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             source_url=url,
             cover_url=cover_url,
             asin=asin,
-            rating=str(data.get("aggregateRating", {}).get("ratingValue") or ""),
-            rating_count=str(data.get("aggregateRating", {}).get("reviewCount") or "")
+            rating=rating,
+            rating_count=rating_count
         )
     except Exception:
         return None

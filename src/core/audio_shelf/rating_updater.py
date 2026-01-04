@@ -300,9 +300,25 @@ class RatingUpdaterEngine:
         else:
             self.log("Skipping Google Books (Disabled in Settings).")
         
+        # CONDITIONAL SCRAPING LOGIC (Waterfall Fallback)
+        # If we already have high-quality vote data (Audnexus + Google), skip slow/fragile scraping.
+        current_valid_votes = 0
+        for m in meta_results:
+             if m.rating_count:
+                 current_valid_votes += self._parse_count(m.rating_count)
+        
+        SCRAPE_THRESHOLD = 50
+        skip_scraping = False
+        
+        if current_valid_votes >= SCRAPE_THRESHOLD:
+             self.log(f"High confidence data found ({current_valid_votes} votes). Skipping slow scraping (Goodreads/Amazon).")
+             skip_scraping = True
+        else:
+             self.log(f"Low vote counts ({current_valid_votes} < {SCRAPE_THRESHOLD}). Enabling fallback scraping...")
+
         # Provider 3: Goodreads (Scraping)
         use_goodreads = self.settings.get('metadata_use_goodreads', True) if self.settings else True
-        if use_goodreads:
+        if use_goodreads and not skip_scraping:
             self.log("Step 3: Trying Goodreads (Scraping)...")
             gr_found = False
             try:
@@ -324,13 +340,15 @@ class RatingUpdaterEngine:
                      
             except Exception as e:
                 self.log(f"Goodreads Error: {e}")
+        elif skip_scraping:
+            self.log("Skipping Goodreads (Sufficient data found).")
         else:
             self.log("Skipping Goodreads (Disabled in Settings).")
 
         # Provider 4: Amazon (Scraping)
         # Added per request for 4th source
         use_amazon = self.settings.get('metadata_use_amazon', True) if self.settings else True
-        if use_amazon:
+        if use_amazon and not skip_scraping:
             self.log("Step 4: Trying Amazon (Scraping)...")
             amz_found = False
             try:
@@ -347,6 +365,8 @@ class RatingUpdaterEngine:
                           break
             except Exception as e:
                  self.log(f"Amazon Error: {e}")
+        elif skip_scraping:
+            self.log("Skipping Amazon (Sufficient data found).")
         else:
             self.log("Skipping Amazon (Disabled in Settings).")
              
@@ -380,7 +400,8 @@ class RatingUpdaterEngine:
         for meta in meta_results:
             if meta.rating:
                 rc = self._parse_count(meta.rating_count)
-                if rc > 0:
+                # Allow 0 count if rating is valid (Fix for Audnexus returning None count)
+                if rc > 0 or (meta.rating and float(meta.rating) > 0):
                     found_ratings.append({
                         "source": meta.source,
                         "rating": float(meta.rating),
@@ -407,31 +428,50 @@ class RatingUpdaterEngine:
         MIN_VOTES_REQUIRED = 500  # Damping factor: Increased to 500 to require more "proof" for high ratings
         
         bayesian_ratings = []
-        total_count = 0
-        
-        for item in found_ratings:
-            v = item["count"]  # votes for this source
-            R = item["rating"]  # actual rating from this source
-            
-            # Apply Bayesian formula
-            bayesian_rating = (v / (v + MIN_VOTES_REQUIRED)) * R + (MIN_VOTES_REQUIRED / (v + MIN_VOTES_REQUIRED)) * BASELINE_RATING
-            
-            bayesian_ratings.append({
-                "source": item["source"],
-                "original_rating": R,
-                "bayesian_rating": bayesian_rating,
-                "count": v
-            })
-            total_count += v
-        
-        # Now calculate final weighted rating using Bayesian-adjusted ratings
-        total_weight = 0.0
-        for item in bayesian_ratings:
-            total_weight += (item["bayesian_rating"] * item["count"])
+        total_count = sum(item["count"] for item in found_ratings)
         
         weighted_rating = 0.0
-        if total_count > 0:
-            weighted_rating = total_weight / total_count
+
+        if total_count == 0:
+            # Special Case: No vote counts available (e.g. only Audnexus with missing count)
+            # Fallback to Simple Average of Raw Ratings to prevent discarding valid data
+            # or crushing it to 2.0 via Bayesian logic.
+            raw_vals = [item["rating"] for item in found_ratings]
+            weighted_rating = sum(raw_vals) / len(raw_vals)
+            self.log(f"⚠️ No vote counts found (Total 0). Using Raw Average: {round(weighted_rating, 2)}")
+        else:
+            # Standard Bayesian Logic
+            # Only process items with votes (v > 0) contribute to the weighted average
+            # Items with v=0 technically contribute 0 weight so they are ignored here.
+            
+            for item in found_ratings:
+                v = item["count"]
+                
+                # Skip 0-vote items in Bayesian Calc (they provide no confidence)
+                if v == 0:
+                    continue
+                    
+                R = item["rating"]
+                
+                # Apply Bayesian formula
+                bayesian_rating = (v / (v + MIN_VOTES_REQUIRED)) * R + (MIN_VOTES_REQUIRED / (v + MIN_VOTES_REQUIRED)) * BASELINE_RATING
+                
+                bayesian_ratings.append({
+                    "source": item["source"],
+                    "original_rating": R,
+                    "bayesian_rating": bayesian_rating,
+                    "count": v
+                })
+            
+            # Now calculate final weighted rating using Bayesian-adjusted ratings
+            total_weight = 0.0
+            processed_count = 0
+            for item in bayesian_ratings:
+                total_weight += (item["bayesian_rating"] * item["count"])
+                processed_count += item["count"]
+            
+            if processed_count > 0:
+                weighted_rating = total_weight / processed_count
             
         weighted_rating = round(weighted_rating, 2)
         
@@ -461,8 +501,16 @@ class RatingUpdaterEngine:
         header_lines = [f"⭐️ Weighted Rating: {bold_rating}/5"]
         for item in found_ratings:
             source_name = item['source']
-            if source_name == "Audnexus": source_name = "Audible"
-            elif source_name == "google_books": source_name = "Google"
+            # Normalize source names for user-friendly display
+            source_lower = source_name.lower()
+            if source_lower == "audnexus" or source_lower == "audible":
+                source_name = "Audible"
+            elif source_lower == "google_books" or source_lower == "google":
+                source_name = "Google Books"
+            elif source_lower == "goodreads":
+                source_name = "Goodreads"
+            elif source_lower == "amazon":
+                source_name = "Amazon"
             
             header_lines.append(f"   • {source_name}: {item['rating']} ({item['count']:,} votes)")
             
@@ -527,6 +575,12 @@ class RatingUpdaterEngine:
                 except:
                     header += f" ({meta.rating_count} reviews)"
         
+        # Debug: Show header line-by-line
+        self.log(f"Rating Header ({len(header.splitlines())} lines):")
+        for i, line in enumerate(header.splitlines(), 1):
+            self.log(f"  L{i}: {line}")
+        
+
         # Calculate Grouping Tag
         # Logic: 4+: "Book Rated 4+", 3-3.99: "Book Rated 3+", 2-2.99: "Book Rated 2+"
         # Remove all if < 2
@@ -569,7 +623,10 @@ class RatingUpdaterEngine:
             self._apply_rating_to_file(path, header, grouping_tag)
             return True
         except Exception as e:
-            self.log(f"Failed to update {os.path.basename(path)}: {e}")
+            import traceback
+            self.log(f"❌ FAILED to update {os.path.basename(path)}")
+            self.log(f"   Error: {e}")
+            self.log(f"   Traceback: {traceback.format_exc()}")
             return False
 
     def _apply_rating_to_file(self, path: str, new_header: str, grouping_tag: str = None):
@@ -624,6 +681,7 @@ class RatingUpdaterEngine:
             # Save to Comment tag - Clear all existing COMM frames first to avoid duplicates
             audio.delall("COMM")
             audio.add(COMM(encoding=3, lang='eng', desc='', text=[new_comment]))
+            self.log(f"---> Wrote MP3 Comment (first 100 chars): {new_comment[:100]}...")
             
             # Grouping (TIT1)
             current_grouping = []
@@ -642,6 +700,8 @@ class RatingUpdaterEngine:
                 audio.delall("TIT1")
                 
             audio.save()
+            self.log(f"✅ MP3 Saved: {os.path.basename(path)}")
+
 
         # --- MP4 ---
         elif ext in ('.m4a', '.m4b'):

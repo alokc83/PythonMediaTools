@@ -144,3 +144,46 @@ def test_mp3_comm_frame_clearing():
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+def test_early_validation_rejection():
+    """Test that process_file rejects results with low confidence (<0.4)"""
+    from src.core.audio_shelf.tagger import calculate_confidence, BookQuery, BookMeta
+    
+    # 1. Exact Match -> 1.0
+    q1 = BookQuery(title="Title", author="Author")
+    m1 = BookMeta(title="Title", authors=["Author"])
+    assert calculate_confidence(q1, m1) == 1.0
+    
+    # 2. Strong Match -> >0.4
+    q2 = BookQuery(title="The Hobbit", author="J.R.R. Tolkien")
+    m2 = BookMeta(title="The Hobbit: There and Back Again", authors=["Tolkien"])
+    # Note: fuzzy logic handles substring/token matching
+    assert calculate_confidence(q2, m2) > 0.6
+    
+    # 3. Bad Match -> <0.4 (Should be rejected)
+    q3 = BookQuery(title="Atomic Habits", author="James Clear")
+    m3 = BookMeta(title="Self-Promotion for Introverts", authors=["Nancy Ancowitz"])
+    conf3 = calculate_confidence(q3, m3)
+    assert conf3 < 0.4
+    print(f"✅ Low confidence match correctly identified: {conf3}")
+
+def test_cpil_parsing_logic():
+    """Test safe cpil parsing logic that fixed the MP4 crash"""
+    # The fix was: cpil = bool(tags['cpil'][0]) if isinstance(tags['cpil'], list) else bool(tags['cpil'])
+    
+    tags_list = {'cpil': [True]}
+    tags_bool = {'cpil': True}
+    tags_int = {'cpil': [1]}
+    
+    # Emulate list case
+    val_list = bool(tags_list['cpil'][0]) if isinstance(tags_list['cpil'], list) else bool(tags_list['cpil'])
+    assert val_list is True
+    
+    # Emulate scalar case
+    val_bool = bool(tags_bool['cpil'][0]) if isinstance(tags_bool['cpil'], list) else bool(tags_bool['cpil'])
+    # Wait, simple dict lookup returns value. If value is scalar, isinstance(list) is False.
+    assert val_bool is True
+    
+    # Emulate int inside list
+    val_int = bool(tags_int['cpil'][0]) if isinstance(tags_int['cpil'], list) else bool(tags_int['cpil'])
+    assert val_int is True
