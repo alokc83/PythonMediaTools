@@ -745,6 +745,7 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
     genre_action = fields_to_update.get("genre", 'skip')
     has_genre = "TCON" in tags
     if (genre_action == 'write' or (genre_action == 'fill' and not has_genre)) and meta.genres:
+        tags.delall("TCON")  # Delete existing genre tag first to prevent duplicates
         genre_str = "; ".join(meta.genres)
         tags.add(TCON(encoding=3, text=[genre_str]))
 
