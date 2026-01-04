@@ -30,6 +30,7 @@ from src.gui.widgets.audio_shelf.tag_editor_widget import TagEditorWidget
 from src.gui.widgets.audio_shelf.atf_cleaner_widget import ATFCleanerWidget
 from src.gui.widgets.audio_shelf.rating_updater_widget import RatingUpdaterWidget
 from src.gui.widgets.audio_shelf.description_updater_widget import DescriptionUpdaterWidget
+from src.gui.widgets.empty_folder_cleaner_widget import EmptyFolderCleanerWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -89,6 +90,7 @@ class MainWindow(QMainWindow):
         # RatingUpdaterWidget(settings, orchestrator)
         self.rating_updater_widget = RatingUpdaterWidget(self.settings_manager, self.orchestrator)
         self.description_updater_widget = DescriptionUpdaterWidget(self.settings_manager, self.orchestrator)
+        self.empty_cleaner_widget = EmptyFolderCleanerWidget(self.settings_manager)
         
         # Stack Order Mapping
         # 0: Dashboard
@@ -106,6 +108,10 @@ class MainWindow(QMainWindow):
         # 7:  Organizer
         # 8:  Pruner
         # 14: Tag Editor
+        # 15: ATF Cleaner
+        # 16: Rating Updater
+        # 17: Description Updater
+        # 18: Empty Cleaner
         
         # We need to map these logical IDs to Stack Indices
         self.page_map = {}
@@ -129,9 +135,9 @@ class MainWindow(QMainWindow):
         
         add_page(self.tag_editor_widget, 14)
         add_page(self.atf_cleaner_widget, 15)
-        add_page(self.atf_cleaner_widget, 15)
         add_page(self.rating_updater_widget, 16)
         add_page(self.description_updater_widget, 17)
+        add_page(self.empty_cleaner_widget, 18)
         
         # Set default
         self.handle_navigation(0)

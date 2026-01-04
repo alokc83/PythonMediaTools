@@ -1100,91 +1100,83 @@ class TaggerEngine:
             return False, "Skipped (Cached: Previous confidence check failed)"
             
         elif atf_status == "SUCCESS" and atf_data:
-            # Check if ATF has all fields we want to update
-            # For now, if we have a successful cache, we assume it's good enough unless forced
-            # But the user asked to check if "current run is for specific fields that is already not in ATF file"
+            # Field-Aware Cache Check: Verify ATF has ALL requested fields
+            self.log("✓ Found ATF cache. Checking field completeness...")
             
             missing_fields = []
             if fields_to_update:
-                for field, needed in fields_to_update.items():
-                    if needed:
-                        if field == "cover":
-                             # Check if cover_base64 exists
-                             if "cover_base64" not in atf_data and not has_cover_art(path):
-                                 missing_fields.append("cover")
-                        elif field == "album_artist":
-                             if not atf_data.get("authors"): # Album Artist maps to authors
-                                 missing_fields.append(field)
-                        elif field == "grouping":
-                             if not atf_data.get("genres"): # Grouping maps to genres
-                                 missing_fields.append(field)
-                        elif field == "compilation":
-                             pass # Compilation is a flag, usually not in metadata search
-                        elif field not in atf_data:
-                            # Map internal names if needed, but for now ATF uses 'title', 'authors', etc.
-                            # 'author' in fields -> 'authors' in ATF
-                            if field == "author" and "authors" in atf_data: continue
-                            if field == "album" and "title" in atf_data: continue # Album = Title
-                            
-                            # If we really are missing data, add to list
-                            # For simplicity, if we have a SUCCESS cache, we likely have the main data.
-                            pass
-
-            # If we decide to use cache:
-            # We can use the data from ATF to write tags directly without fetching from API!
-            pass 
-            # But for "Skipping directory", user said: "If current run is same for the data already there. then it would skip the directory."
-            # So if we have SUCCESS and we are not forcing, we can skip fetching?
-            # Actually, let's implement the "Skip Directory" logic first. 
-            # If the user wants to update tags on files that *haven't* been updated, but the directory scan
-            # says "I already did this book", do we skip?
-            # Yes, "app is not updating each and every file that have been update before."
+                for field_name, is_needed in fields_to_update.items():
+                    if not is_needed:
+                        continue  # User didn't select this field
+                    
+                    # Map UI field names to ATF keys
+                    if field_name == "cover":
+                        if "cover_base64" not in atf_data or not atf_data["cover_base64"]:
+                            missing_fields.append("cover")
+                    elif field_name == "author":
+                        if not atf_data.get("authors") or not atf_data["authors"]:
+                            missing_fields.append("author")
+                    elif field_name == "album":
+                        # Album maps to title for audiobooks
+                        if not atf_data.get("title"):
+                            missing_fields.append("album")
+                    elif field_name == "album_artist":
+                        if not atf_data.get("authors") or not atf_data["authors"]:
+                            missing_fields.append("album_artist")
+                    elif field_name == "genre":
+                        if not atf_data.get("genres") or not atf_data["genres"]:
+                            missing_fields.append("genre")
+                    elif field_name == "year":
+                        if not atf_data.get("published_date"):
+                            missing_fields.append("year")
+                    elif field_name in ["title", "publisher", "description"]:
+                        # Direct mapping
+                        if not atf_data.get(field_name):
+                            missing_fields.append(field_name)
             
-            # Simple logic: If valid ATF exists and we are not forcing a refresh, SKIP.
-            # But we might need to APPLY the cached tags to the file if the file lacks them?
-            # User said: "app is not updating... each file that have been updated before"
-            # implying we assume files are done if ATF is present.
-            
-            # However, if the user added new files to the folder, we might want to tag them using cached data.
-            # Let's try to USE valid cache to tag the file, skipping the API search.
-            self.log("Found cached metadata (ATF). Using cache instead of online search.")
-            
-            meta = BookMeta(
-                source=atf_data.get("source", "Cache"),
-                title=atf_data.get("title"),
-                authors=atf_data.get("authors", []),
-                published_date=atf_data.get("published_date"),
-                description=atf_data.get("description"),
-                publisher=atf_data.get("publisher"),
-                genres=atf_data.get("genres", []),
-                asin=atf_data.get("asin"),
-                cover_url=None
-            )
-            
-            cover_data = None
-            if atf_data.get("cover_base64"):
-                try:
-                    cover_data = base64.b64decode(atf_data["cover_base64"])
-                except:
-                    pass
-            
-            # Proceed to write tags using this meta -- BUT SKIP IF ALREADY MATCHES
-            if not dry_run and not force_cover:
-                 # Check if the file tags effectively match the meta we are about to write
-                 # This prevents re-writing thousands of files that are already correct.
-                 if is_file_metadata_match(path, meta, fields_to_update):
-                     # Also check cover? (Rough check: if not forcing cover, and text matches, we assume good)
-                     # Or check if cover exists. logic is complex, simpler to trust text match + has_cover check
-                     if has_cover_art(path):
-                         self.log("Skipping file (Metadata & Cover already up-to-date with Cache).")
-                         return True, "Skipped (Already up-to-date)"
-            
-            if dry_run:
-                self.log("🔍 DRY RUN: Using Cached Metadata (would apply tags...)")
-                return True, "Dry Run"
+            # Check if we can use cache
+            if missing_fields:
+                self.log(f"⚠️  Cache incomplete. Missing: {', '.join(missing_fields)}")
+                self.log("Proceeding with online metadata fetch...")
+                # Fall through to online search below
             else:
-                apply_metadata(path, meta, cover_data, fields_to_update)
-                return True, "Tags updated from Cache"
+                # Cache has all requested fields - use it!
+                self.log("✅ Cache complete. Using ATF data for all selected fields.")
+                
+                meta = BookMeta(
+                    source=atf_data.get("source", "Cache"),
+                    title=atf_data.get("title"),
+                    authors=atf_data.get("authors", []),
+                    published_date=atf_data.get("published_date"),
+                    description=atf_data.get("description"),
+                    publisher=atf_data.get("publisher"),
+                    genres=atf_data.get("genres", []),
+                    asin=atf_data.get("asin"),
+                    cover_url=None
+                )
+                
+                cover_data = None
+                if atf_data.get("cover_base64"):
+                    try:
+                        import base64
+                        cover_data = base64.b64decode(atf_data["cover_base64"])
+                    except Exception as e:
+                        self.log(f"Failed to decode cover from cache: {e}")
+                
+                # Check if file is already up-to-date (optimization)
+                if not dry_run and not force_cover:
+                    if is_file_metadata_match(path, meta, fields_to_update):
+                        if has_cover_art(path) or not fields_to_update.get("cover"):
+                            self.log("File already up-to-date with cache.")
+                            return True, "Skipped (Already up-to-date)"
+                
+                if dry_run:
+                    self.log("🔍 DRY RUN: Would apply cached metadata to file")
+                    return True, "Dry Run (Cache)"
+                else:
+                    apply_metadata(path, meta, cover_data, fields_to_update)
+                    self.log("✓ Tags updated from cache")
+                    return True, "Tags updated from Cache"
 
         # --- END ATF CHECK ---
 

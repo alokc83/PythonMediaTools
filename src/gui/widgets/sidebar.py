@@ -90,6 +90,7 @@ class SidebarWidget(QWidget):
         self.add_nav_btn("Mass Compare", 10)
         self.add_nav_btn("ATF Cleaner", 15)
         self.add_nav_btn("Rating Updater", 16)
+        self.add_nav_btn("Desc. Updater", 17)
 
         self.nav_layout.addSpacing(15)
 
@@ -103,6 +104,7 @@ class SidebarWidget(QWidget):
         self.add_nav_btn("Blinkist Pruner", 8)
         self.add_nav_btn("Unique Copier", 12)
         self.add_nav_btn("Bitrate Mover", 13)
+        self.add_nav_btn("Empty Cleaner", 18)
 
         self.nav_layout.addStretch()
         
