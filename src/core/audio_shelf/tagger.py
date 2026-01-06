@@ -242,8 +242,35 @@ def calculate_confidence(query: BookQuery, meta: BookMeta) -> float:
             # All query authors found (order doesn't matter)
             author_sim = 1.0
         else:
-            # Fall back to fuzzy matching (on cleaned strings)
-            author_sim = difflib.SequenceMatcher(None, q_auth_clean, found_auth_clean).ratio()
+            # SMART CONTAINMENT: Check if found author is contained in query author
+            # This handles cases where query has extra narrator/edition info
+            # Example: Query="Wallace D. Wattles as read by Mike DeWitt" Found="Wallace D. Wattles"
+            if found_auth_clean in q_auth_clean and len(found_auth_clean) > 0:
+                # Found is subset of query - check what the extra text is
+                extra_text = q_auth_clean.replace(found_auth_clean, "").strip()
+                
+                # Pattern detection: Is the extra text narrator/edition metadata?
+                narrator_patterns = r'(as read by|narrated by|read by|performed by|narrator|voice)'
+                edition_patterns = r'(unabridged|annotated|full cast|dramatization|illustrated|revised|expanded|complete)'
+                
+                is_narrator = bool(re.search(narrator_patterns, extra_text, re.IGNORECASE))
+                is_edition = bool(re.search(edition_patterns, extra_text, re.IGNORECASE))
+                
+                if is_narrator:
+                    # Narrator info - this is expected to be missing from online metadata
+                    # Give perfect score since core author matches
+                    author_sim = 1.0
+                elif is_edition:
+                    # Edition info - slightly penalize but still high confidence
+                    # User might care about specific edition, but probably just extra detail
+                    author_sim = 0.95
+                else:
+                    # Unknown extra text - fall back to fuzzy matching
+                    # Could be important (co-author, translator, etc.)
+                    author_sim = difflib.SequenceMatcher(None, q_auth_clean, found_auth_clean).ratio()
+            else:
+                # No containment - standard fuzzy match
+                author_sim = difflib.SequenceMatcher(None, q_auth_clean, found_auth_clean).ratio()
     
     # Adaptive Weighting: Only score fields that exist in query
     if author_sim is not None:
@@ -502,11 +529,11 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             cover_url = img.get("src", "")
 
         
-        # 8. Rating & Rating Count - Try JSON first, then HTML fallback
+        # 8. Rating & Rating Count - Multiple strategies with improved selectors
         rating = ""
         rating_count = ""
         
-        # Try JSON
+        # Strategy 1: Try the adbl-product-metadata JSON (original source)
         if json_script:
             try:
                 rating = str(data.get("aggregateRating", {}).get("ratingValue") or "")
@@ -514,10 +541,44 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             except:
                 pass
         
-        # Fallback: Scrape from HTML if JSON failed
+        # Strategy 2: Check ALL JSON scripts for rating data (NEW - most reliable!)
+        # Audible embeds rating in a different JSON script: {"rating":{"count":13624,"value":4.63}}
         if not rating or not rating_count:
-            # Look for rating spans like: <span class="bc-text bc-size-large">4.7</span>
-            # And count like: <span class="bc-text bc-color-secondary">12,543 ratings</span>
+            all_scripts = soup.select("script[type='application/json']")
+            for script in all_scripts:
+                try:
+                    script_data = json.loads(script.get_text())
+                    # Check if this script has rating data
+                    if "rating" in script_data and isinstance(script_data["rating"], dict):
+                        rating_obj = script_data["rating"]
+                        if "value" in rating_obj:
+                            rating = str(rating_obj["value"])
+                        if "count" in rating_obj:
+                            rating_count = str(rating_obj["count"])
+                        if rating and rating_count:
+                            break  # Found it!
+                except:
+                    continue
+        
+        # Strategy 3: aria-label on review link (very reliable!)
+        # Example: "4.6 out of 5 stars, based on 13624 ratings."
+        if not rating or not rating_count:
+            review_link = soup.select_one("a[href='#customer-reviews']")
+            if review_link:
+                aria_label = review_link.get("aria-label", "")
+                if aria_label:
+                    # Extract rating value: "4.6 out of 5 stars"
+                    rating_match = re.search(r'(\d+\.?\d*)\s*out of 5 stars', aria_label, re.IGNORECASE)
+                    if rating_match and not rating:
+                        rating = rating_match.group(1)
+                    
+                    # Extract count: "based on 13624 ratings"
+                    count_match = re.search(r'based on\s*([\d,]+)\s*ratings?', aria_label, re.IGNORECASE)
+                    if count_match and not rating_count:
+                        rating_count = count_match.group(1).replace(',', '')  # Remove commas
+        
+        # Strategy 4: Old HTML fallback (keep as last resort)
+        if not rating or not rating_count:
             rating_spans = soup.select("span.bc-text")
             for span in rating_spans:
                 text = span.get_text().strip()
@@ -529,7 +590,7 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
                     # Extract number from "12,543 ratings" or "12543 ratings"
                     match = re.search(r'([\d,]+)\s*rating', text, re.IGNORECASE)
                     if match:
-                        rating_count = match.group(1)
+                        rating_count = match.group(1).replace(',', '')
         
         asin = extract_asin_from_url(url) or ""
         
@@ -541,7 +602,7 @@ def provider_audible_scrape(session: requests.Session, url: str) -> Optional[Boo
             published_date=release_date,
             description=shorten_description(desc),
             genres=uniq_ci(genres),
-            source="audible_scrape",
+            source="audible",  # Direct Audible scraping (not audnexus API)
             source_url=url,
             cover_url=cover_url,
             asin=asin,
@@ -558,7 +619,12 @@ def google_books_search(session: requests.Session, q: BookQuery, api_key: str = 
     query = " ".join(parts)
     
     url = "https://www.googleapis.com/books/v1/volumes"
-    params = {"q": query, "maxResults": 1, "printType": "books"}
+    params = {
+        "q": query, 
+        "maxResults": 1, 
+        "printType": "books",
+        "langRestrict": "en"  # Restrict to English language books only
+    }
     
     # Add API key if provided for higher rate limits
     if api_key:
@@ -686,7 +752,7 @@ def has_valid_genre(path: str) -> bool:
 
 def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_to_update: dict = None):
     if fields_to_update is None:
-        fields_to_update = {"title": True, "author": True, "album": True, "album_artist": True, "genre": True, "year": True, "publisher": True, "description": True, "cover": True, "grouping": True, "compilation": True}
+        fields_to_update = {"title": 'write', "author": 'write', "album": 'write', "album_artist": 'write', "genre": 'write', "year": 'write', "publisher": 'write', "description": 'write', "cover": 'write', "grouping": 'write', "compilation": 'write'}
     
     try:
         tags = ID3(path)
@@ -749,6 +815,7 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
         genre_str = "; ".join(meta.genres)
         tags.add(TCON(encoding=3, text=[genre_str]))
 
+
     # Clear Track/Disc Numbers (single file audiobooks shouldn't have these)
     tags.delall("TRCK")  # Track number
     tags.delall("TPOS")  # Disc number
@@ -771,7 +838,7 @@ def update_mp3_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
 
 def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_to_update: dict = None):
     if fields_to_update is None:
-        fields_to_update = {"title": True, "author": True, "album": True, "album_artist": True, "genre": True, "year": True, "publisher": True, "description": True, "cover": True, "grouping": True, "compilation": True}
+        fields_to_update = {"title": 'write', "author": 'write', "album": 'write', "album_artist": 'write', "genre": 'write', "year": 'write', "publisher": 'write', "description": 'write', "cover": 'write', "grouping": 'write', "compilation": 'write'}
     
     tags = MP4(path)
     
@@ -843,7 +910,7 @@ def update_mp4_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_
 
 def update_opus_tags(path: str, meta: BookMeta, cover_data: bytes = None, fields_to_update: dict = None):
     if fields_to_update is None:
-        fields_to_update = {"title": True, "author": True, "album": True, "album_artist": True, "genre": True, "year": True, "publisher": True, "description": True, "cover": True, "grouping": True, "compilation": True}
+        fields_to_update = {"title": 'write', "author": 'write', "album": 'write', "album_artist": 'write', "genre": 'write', "year": 'write', "publisher": 'write', "description": 'write', "cover": 'write', "grouping": 'write', "compilation": 'write'}
     
     tags = OggOpus(path)
     
@@ -1049,12 +1116,49 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
     
     # Description: Prefer Longest with Quality Checks
     # With 256MB tag limit, we want the fullest description available
+    # BUT: Reject non-English descriptions
+    def is_likely_english(text):
+        """Simple heuristic to detect if text is likely English"""
+        if not text or len(text) < 10:
+            return True  # Too short to determine, accept
+        
+        # Check for common non-English patterns
+        # Indonesian: "yang", "dan", "ini", "untuk", "dengan"
+        # Spanish: "el", "la", "que", "de", "español"
+        # French: "le", "la", "de", "est", "français"
+        non_english_indicators = [
+            r'\byou are holding\b',  # Literal translation artifact
+            r'\byang\b.*\bdan\b.*\bini\b',  # Indonesian pattern
+            r'\bAnda\b.*\bini\b',  # Indonesian "you" pattern
+            r'\bBuku yang Anda\b',  # "The book you" in Indonesian
+            r'\blivre que vous\b',  # "book that you" in French
+            r'\bel libro que\b',  # "the book that" in Spanish
+        ]
+        
+        for pattern in non_english_indicators:
+            if re.search(pattern, text, re.IGNORECASE):
+                return False
+        
+        return True
+    
     desc = primary.description or ""
     primary_len = len(desc)
     secondary_len = len(secondary.description or "")
     
-    # Always pick the longest description available
-    if secondary_len > primary_len and secondary.description:
+    # Check English validity
+    primary_is_english = is_likely_english(desc)
+    secondary_is_english = is_likely_english(secondary.description or "")
+    
+    # Selection logic with language preference
+    if not primary_is_english and secondary_is_english:
+        # Primary is non-English, secondary is English - use secondary
+        desc = secondary.description
+        print(f"[Merge] Using {secondary.source} (English, {secondary_len} chars) over {primary.source} (non-English, {primary_len} chars)")
+    elif primary_is_english and not secondary_is_english:
+        # Primary is English, secondary is not - keep primary
+        print(f"[Merge] Keeping {primary.source} (English, {primary_len} chars), rejecting {secondary.source} (non-English)")
+    elif secondary_len > primary_len and secondary.description and secondary_is_english:
+        # Both English (or both non-English), pick longest
         desc = secondary.description
         print(f"[Merge] Using {secondary.source} description ({secondary_len} chars) over {primary.source} ({primary_len} chars)")
     elif primary_len > 0:
@@ -1064,6 +1168,10 @@ def merge_metadata(primary: BookMeta, secondary: BookMeta) -> BookMeta:
     MIN_VALID_DESC = 50
     if len(desc) < MIN_VALID_DESC and len(desc) > 0:
         print(f"[Merge] WARNING: Final description is short ({len(desc)} chars, recommend {MIN_VALID_DESC}+)")
+    
+    # Warn if final description is not English
+    if desc and not is_likely_english(desc):
+        print(f"[Merge] ⚠️ WARNING: Final description may not be English!")
 
         
     # Date/Publisher: Prefer Primary, fallback to secondary
